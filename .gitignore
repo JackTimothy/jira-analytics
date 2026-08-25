@@ -2,10 +2,11 @@
 projects.yaml
 .env
 
-# Build output
+# Build output. These are anchored to the repository root: an unanchored
+# "server" would also match the cmd/server package directory.
 /bin/
 /dist/
-server
+/server
 
 # Node
 node_modules/
