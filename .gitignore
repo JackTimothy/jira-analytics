@@ -1,0 +1,12 @@
+# Local deployment configuration — never commit real project definitions
+projects.yaml
+.env
+
+# Build output
+/bin/
+/dist/
+server
+
+# Node
+node_modules/
+web/dist/
