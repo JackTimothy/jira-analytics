@@ -33,6 +33,12 @@ const (
 // setting the app up for the first time sees the whole list rather than
 // discovering one missing variable per restart.
 func Load() (Config, error) {
+	// A local .env supplies defaults for anything not already exported. Done
+	// here so every entry point picks it up rather than only the server.
+	if err := LoadEnvFile(envOr("ENV_FILE", DefaultEnvFile)); err != nil {
+		return Config{}, err
+	}
+
 	config := Config{
 		Port:          envOr("PORT", defaultPort),
 		ProjectsFile:  envOr("PROJECTS_FILE", defaultProjectsFile),

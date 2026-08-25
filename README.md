@@ -78,17 +78,24 @@ cp projects.example.yaml projects.yaml   # projects.yaml is gitignored
 $EDITOR projects.yaml                    # fill in your tracker project and repos
 ```
 
-Credentials come from the environment, never from the file:
+Credentials come from the environment, never from `projects.yaml`. Either
+export them, or put them in a `.env` file, which is read on startup:
 
 ```sh
-export JIRA_BASE_URL=https://your-site.atlassian.net
-export JIRA_EMAIL=you@example.com
-export JIRA_API_TOKEN=...     # id.atlassian.com/manage-profile/security/api-tokens
-export GITHUB_TOKEN=...
+cp .env.example .env    # .env is gitignored
+$EDITOR .env
 ```
 
-Optional: `PORT` (default 8080), `PROJECTS_FILE` (default `projects.yaml`),
-`WEB_DIR` (default `web/dist`), `GITHUB_BASE_URL` (for GitHub Enterprise).
+Exported variables win over the file, so a value can be overridden for a single
+run without editing anything:
+
+```sh
+JIRA_API_TOKEN=other-token go run ./cmd/server
+```
+
+Point `ENV_FILE` elsewhere to read a different file. Optional settings: `PORT`
+(default 8080), `PROJECTS_FILE` (default `projects.yaml`), `WEB_DIR` (default
+`web/dist`), `GITHUB_BASE_URL` (for GitHub Enterprise).
 
 ### Run
 
