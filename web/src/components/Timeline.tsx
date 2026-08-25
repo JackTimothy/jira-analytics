@@ -17,6 +17,14 @@ const MIN_PLOT_WIDTH = 520;
  */
 const SEGMENT_GAP = 2;
 
+/**
+ * The narrowest a segment may be drawn. A state can be real and consequential
+ * while lasting seconds — an approval moments before the merge it unblocked —
+ * and at a fortnight per screen that is a hundredth of a pixel. Clamping keeps
+ * the event visible; the tooltip and the table carry its true duration.
+ */
+const MIN_SEGMENT_WIDTH = 3;
+
 interface Row {
   kind: "group" | "subtask";
   key: string;
@@ -214,15 +222,27 @@ export function Timeline({ parents, sprint }: { parents: Parent[]; sprint: Sprin
                 <tspan dx={6}>{truncate(row.sublabel ?? "", 26)}</tspan>
               </text>
 
-              {intervals.map((interval, index) => {
-                const x1 = scale(interval.from);
-                const x2 = scale(interval.to);
-                const isFirst = index === 0;
-                const isLast = index === intervals.length - 1;
-                const rawWidth = x2 - x1 - (isLast ? 0 : SEGMENT_GAP);
-                const barWidth = Math.max(1, rawWidth);
-
-                return (
+              {intervals
+                .map((interval, index) => {
+                  const x1 = scale(interval.from);
+                  const x2 = scale(interval.to);
+                  const isLast = index === intervals.length - 1;
+                  const trueWidth = x2 - x1 - (isLast ? 0 : SEGMENT_GAP);
+                  return {
+                    interval,
+                    index,
+                    x1,
+                    trueWidth,
+                    barWidth: Math.max(MIN_SEGMENT_WIDTH, trueWidth),
+                    isFirst: index === 0,
+                    isLast,
+                  };
+                })
+                // Widest first, so a clamped sliver is painted last and cannot
+                // be buried under the segment that follows it.
+                .sort((a, b) => b.trueWidth - a.trueWidth)
+                .map(({ interval, index, x1, barWidth, isFirst, isLast }) => {
+                  return (
                   <rect
                     key={`${interval.from}-${index}`}
                     x={x1}
@@ -250,8 +270,8 @@ export function Timeline({ parents, sprint }: { parents: Parent[]; sprint: Sprin
                       interval.to,
                     )}`}
                   />
-                );
-              })}
+                  );
+                })}
             </g>
           );
         })}

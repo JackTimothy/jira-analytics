@@ -166,6 +166,12 @@ is the single worst pair under deuteranopia.
 A table view exists alongside the chart, and every state is labelled in the
 legend, so identity never rests on colour alone.
 
+Segments are clamped to a minimum width and painted widest-first. A state can
+be real and consequential while lasting seconds — an approval moments before
+the merge it unblocked — and at a fortnight per screen that is a hundredth of a
+pixel, drawn under the segment that follows it. Clamping keeps the event
+visible; the tooltip and the table carry its true duration.
+
 ### Which sprints appear
 
 Sprints are read from the project's own issues, not from a board. A board's

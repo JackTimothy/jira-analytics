@@ -176,6 +176,12 @@ func (c *CodeHost) pullsInWindow(ctx context.Context, repo domain.RepoRef, windo
 	cutoff := window.Start.Add(-pullLookback)
 	var matches []pullMatch
 
+	// Guard against the same pull request arriving twice. Replaying an opened
+	// event after a merge would clear the merge and leave the timeline
+	// oscillating, so a listing that repeats itself must not be trusted to
+	// stop on its own.
+	seen := map[int]struct{}{}
+
 	for page := 1; page <= maxPullPages; page++ {
 		query := url.Values{
 			"state":     {"all"},
@@ -190,8 +196,14 @@ func (c *CodeHost) pullsInWindow(ctx context.Context, repo domain.RepoRef, windo
 			return nil, fmt.Errorf("listing pull requests for %s: %w", repo, err)
 		}
 
-		exhausted := false
+		exhausted, fresh := false, 0
 		for _, pull := range pulls {
+			if _, already := seen[pull.Number]; already {
+				continue
+			}
+			seen[pull.Number] = struct{}{}
+			fresh++
+
 			if pull.UpdatedAt.Before(cutoff) {
 				// Sorted newest-first, so everything after this is older still.
 				exhausted = true
@@ -210,7 +222,7 @@ func (c *CodeHost) pullsInWindow(ctx context.Context, repo domain.RepoRef, windo
 			}
 		}
 
-		if exhausted || len(pulls) < 100 {
+		if exhausted || len(pulls) < 100 || fresh == 0 {
 			break
 		}
 	}

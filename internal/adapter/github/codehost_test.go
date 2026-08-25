@@ -474,3 +474,36 @@ func TestPullsInWindowIgnoresWorkOutsideTheSprint(t *testing.T) {
 		t.Errorf("got %d matches for a window with no activity: %+v", len(matches), matches)
 	}
 }
+
+func TestPullsInWindowIgnoresARepeatedListing(t *testing.T) {
+	// A listing that hands back the same pull requests on every page would
+	// otherwise be replayed: a second "opened" event clears the merge recorded
+	// by the first, leaving the timeline oscillating between states.
+	var pages int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pages++
+		var repeated []string
+		for i := 0; i < 100; i++ {
+			repeated = append(repeated, `{"number":1,"title":"PROJ-10 work","draft":false,
+				"created_at":"2026-08-05T13:00:00Z","updated_at":"2026-08-09T13:00:00Z",
+				"merged_at":"2026-08-09T13:00:00Z","head":{"ref":"PROJ-10-work"}}`)
+		}
+		io.WriteString(w, "["+strings.Join(repeated, ",")+"]")
+	}))
+	defer server.Close()
+
+	host := NewCodeHost(Config{BaseURL: server.URL, Token: "t"},
+		httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })))
+
+	matches, err := host.pullsInWindow(context.Background(), testRepo, testGitHubWindow,
+		newKeyMatcher([]domain.IssueKey{"PROJ-10"}))
+	if err != nil {
+		t.Fatalf("pullsInWindow: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Errorf("got %d matches for one repeated pull request, want 1", len(matches))
+	}
+	if pages > 2 {
+		t.Errorf("kept paging a listing that repeated itself: %d pages", pages)
+	}
+}
