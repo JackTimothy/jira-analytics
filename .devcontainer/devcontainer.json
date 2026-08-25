@@ -1,0 +1,58 @@
+{
+  "name": "Delivery Analytics",
+
+  // Go is the base image because the API is the larger half of the project;
+  // Node arrives as a feature. Both are pinned to the versions the code
+  // actually requires: go.mod declares 1.24, and Vite 6 needs Node 18, 20 or
+  // 22 — 22 is what the client is built and tested against.
+  "image": "mcr.microsoft.com/devcontainers/go:1.24-bookworm",
+
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": {
+      "version": "22"
+    }
+  },
+
+  "forwardPorts": [8080, 5173],
+  "portsAttributes": {
+    "8080": { "label": "API + built client", "onAutoForward": "notify" },
+    "5173": { "label": "Vite dev server", "onAutoForward": "openBrowser" }
+  },
+
+  // Secrets are read from the host environment rather than stored in the repo
+  // or the image. Export these in your shell before opening the container; an
+  // unset variable simply arrives empty, and the server reports which ones are
+  // missing on startup.
+  "remoteEnv": {
+    "JIRA_BASE_URL": "${localEnv:JIRA_BASE_URL}",
+    "JIRA_EMAIL": "${localEnv:JIRA_EMAIL}",
+    "JIRA_API_TOKEN": "${localEnv:JIRA_API_TOKEN}",
+    "GITHUB_TOKEN": "${localEnv:GITHUB_TOKEN}",
+    "GITHUB_BASE_URL": "${localEnv:GITHUB_BASE_URL}"
+  },
+
+  "onCreateCommand": "bash .devcontainer/setup.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "dbaeumer.vscode-eslint",
+        "esbenp.prettier-vscode",
+        "redhat.vscode-yaml"
+      ],
+      "settings": {
+        "go.toolsManagement.autoUpdate": false,
+        "go.lintTool": "golangci-lint",
+        "gopls": {
+          "formatting.gofumpt": false
+        },
+        "[go]": {
+          "editor.formatOnSave": true,
+          "editor.defaultFormatter": "golang.go"
+        },
+        "files.eol": "\n"
+      }
+    }
+  }
+}

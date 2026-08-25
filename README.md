@@ -68,8 +68,22 @@ Without that, every sprint ending near midnight UTC is misclassified.
 ### Prerequisites
 
 - Go 1.24+
-- Node 20+
+- Node 18, 20 or 22
 - A Jira API token and a GitHub token with read access to your repositories
+
+Or open the repository in the supplied dev container, which pins both toolchains
+and installs everything on first build. Export your credentials on the host
+before opening it and they pass through:
+
+```sh
+export JIRA_BASE_URL=https://your-site.atlassian.net
+export JIRA_EMAIL=you@example.com
+export JIRA_API_TOKEN=...
+export GITHUB_TOKEN=...
+```
+
+The container seeds `projects.yaml` from the example on first create; edit it
+with your tracker project and repositories before running the server.
 
 ### Configure
 

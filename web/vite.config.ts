@@ -4,6 +4,11 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   server: {
+    // Bind all interfaces so the dev server is reachable from the host when it
+    // runs inside a container. Vite defaults to localhost, which port
+    // forwarding cannot always reach.
+    host: true,
+
     // In development the client runs on Vite's port and the API on the Go
     // server's, so same-origin fetches are proxied rather than requiring CORS.
     proxy: {
