@@ -104,10 +104,12 @@ func routeJQL(body []byte) (string, bool) {
 var githubRoutes = map[string]string{
 	"/repos/acme/service": `{"default_branch":"dev"}`,
 
-	"/repos/acme/service/git/matching-refs/heads/PROJ-": `[
-		{"ref":"refs/heads/PROJ-10-api"},
-		{"ref":"refs/heads/PROJ-11-ui"}]`,
+	// PROJ-10 merged and its branch was deleted; PROJ-11 is still open.
+	"/repos/acme/service/git/matching-refs/heads/PROJ-": `[{"ref":"refs/heads/PROJ-11-ui"}]`,
 	"/repos/acme/service/git/matching-refs/heads/proj-": `[]`,
+
+	"/repos/acme/service/pulls/1/commits": `[{"commit":{"committer":{"date":"2026-08-04T13:00:00Z"}}}]`,
+	"/repos/acme/service/pulls/2/commits": `[{"commit":{"committer":{"date":"2026-08-05T13:00:00Z"}}}]`,
 
 	"/repos/acme/service/compare/dev...PROJ-10-api": `{"commits":[{"commit":{"committer":{"date":"2026-08-04T13:00:00Z"}}}]}`,
 	"/repos/acme/service/compare/dev...PROJ-11-ui":  `{"commits":[{"commit":{"committer":{"date":"2026-08-05T13:00:00Z"}}}]}`,
@@ -160,16 +162,18 @@ func routeByQuery(r *http.Request) (string, bool) {
 	if r.URL.Path != "/repos/acme/service/pulls" {
 		return "", false
 	}
-	switch r.URL.Query().Get("head") {
-	case "acme:PROJ-10-api":
-		return `[{"number":1,"title":"PROJ-10 api","draft":false,"created_at":"2026-08-05T13:00:00Z",
-			"merged_at":"2026-08-09T13:00:00Z","head":{"ref":"PROJ-10-api"}}]`, true
-	case "acme:PROJ-11-ui":
-		return `[{"number":2,"title":"PROJ-11 ui","draft":false,"created_at":"2026-08-06T13:00:00Z",
-			"head":{"ref":"PROJ-11-ui"}}]`, true
-	default:
+	if r.URL.Query().Get("page") != "1" {
 		return `[]`, true
 	}
+	// The merged pull request's branch is gone, so only its title names the
+	// issue — the ordinary shape of finished work.
+	return `[
+		{"number":1,"title":"PROJ-10-api-endpoint (#4683)","draft":false,
+		 "created_at":"2026-08-05T13:00:00Z","updated_at":"2026-08-09T13:00:00Z",
+		 "merged_at":"2026-08-09T13:00:00Z","head":{"ref":"deleted-on-merge"}},
+		{"number":2,"title":"PROJ-11 ui","draft":false,
+		 "created_at":"2026-08-06T13:00:00Z","updated_at":"2026-08-07T13:00:00Z",
+		 "head":{"ref":"PROJ-11-ui"}}]`, true
 }
 
 func buildStack(t *testing.T) http.Handler {

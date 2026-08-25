@@ -36,6 +36,7 @@ type pullJSON struct {
 	Title     string     `json:"title"`
 	Draft     bool       `json:"draft"`
 	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
 	ClosedAt  *time.Time `json:"closed_at"`
 	MergedAt  *time.Time `json:"merged_at"`
 	Head      struct {

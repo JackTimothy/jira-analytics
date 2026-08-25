@@ -181,32 +181,38 @@ Every issue query is scoped to the project for the same reason — a sprint on a
 shared board holds other teams' issues, and a retrospective that mixed them in
 would be worse than useless.
 
-### Finding the branches
+### Finding the code
 
-Branch discovery leans on the convention that a branch name **begins** with its
-issue key. Every sub-task in a sprint shares the same project key, so one
-prefix query per project asks the code host for exactly the candidate branches
-rather than listing the repository. On a long-lived monorepo that is the
-difference between a cost that scales with the sprint and one that scales with
-every branch anyone has ever left behind.
+Work is linked to an issue by the issue key, from two directions.
 
-Two properties of the server-side match are handled explicitly, both verified
-against the live API:
+**Pull requests come first**, matched on head branch and then on title. This is
+what finds finished work: merging deletes the head branch by default, so
+anything branch-led would go blind on exactly the sub-tasks that completed. The
+title survives — a squash merge leaves `Title (#123)` behind — which is why it
+is the fallback. A code host cannot filter pull requests by issue key
+server-side, so the scan is bounded by the sprint window plus a lookback, since
+a pull request opened well before the sprint and left untouched still describes
+the state the sprint opened in.
 
-- It is **case sensitive**, so the lowercase prefix is queried too.
-- It matches **raw characters, not whole tokens**, so a query for `PROJ-1` also
-  returns `PROJ-10-…` and `PROJ-123-…`. Every candidate is run back through the
-  key parser, which reads whole keys and rejects those.
+**Then branches that no pull request covers**, found with one prefix query per
+project key — work in progress, where a branch exists and review has not
+started. Two properties of the server-side ref match are handled explicitly,
+both verified against the live API: it is **case sensitive**, so the lowercase
+prefix is queried too, and it matches **raw characters, not whole tokens**, so a
+query for `PROJ-1` also returns `PROJ-10-…`. Every candidate goes back through
+the key parser, which reads whole keys and rejects those.
 
-A branch that does not start with its issue key will not be found. That shows up
-as a `no linked branch or pull request found` warning on the retrospective rather
-than as a silently empty row.
+A sub-task with neither a pull request nor a branch shows up as a
+`no linked branch or pull request found` warning rather than a silently empty
+row.
 
 ### Known approximation
 
-Code hosts record no branch-creation timestamp, so the earliest commit unique to
-a branch stands in for it. That is the one value in the whole timeline that is
-inferred rather than observed, and it is confined to the code-host adapter.
+Code hosts record no branch-creation timestamp, so the earliest commit stands in
+for it — taken from the pull request where there is one, since that keeps
+working after the branch is deleted, and from comparing refs otherwise. That is
+the one value in the whole timeline that is inferred rather than observed, and
+it is confined to the code-host adapter.
 
 ## Tests
 

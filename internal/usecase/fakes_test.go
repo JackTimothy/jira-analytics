@@ -63,7 +63,7 @@ type fakeCodeHost struct {
 	err    error
 }
 
-func (f fakeCodeHost) LinkedEvents(context.Context, []domain.RepoRef, domain.ReviewerPolicy, []domain.IssueKey) (map[domain.IssueKey][]domain.Event, error) {
+func (f fakeCodeHost) LinkedEvents(context.Context, []domain.RepoRef, domain.ReviewerPolicy, []domain.IssueKey, domain.Window) (map[domain.IssueKey][]domain.Event, error) {
 	return f.events, f.err
 }
 

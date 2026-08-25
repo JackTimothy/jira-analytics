@@ -35,9 +35,13 @@ type IssueTracker interface {
 // linked to an issue, and everything that happened to them.
 type CodeHost interface {
 	// LinkedEvents returns the domain events implied by code activity for each
-	// issue key. Keys with no linked branch are absent from the result, which
-	// is how the interactor knows to warn rather than silently chart nothing.
-	LinkedEvents(ctx context.Context, repos []domain.RepoRef, policy domain.ReviewerPolicy, keys []domain.IssueKey) (map[domain.IssueKey][]domain.Event, error)
+	// issue key. Keys with no linked code are absent from the result, which is
+	// how the interactor knows to warn rather than silently chart nothing.
+	//
+	// The window lets the implementation bound its search: a code host cannot
+	// filter pull requests by issue key server-side, so it needs to know which
+	// span of activity is worth looking at.
+	LinkedEvents(ctx context.Context, repos []domain.RepoRef, policy domain.ReviewerPolicy, keys []domain.IssueKey, window domain.Window) (map[domain.IssueKey][]domain.Event, error)
 }
 
 // ProjectStore holds the configured projects and their user-editable settings.

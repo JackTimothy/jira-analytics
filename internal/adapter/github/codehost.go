@@ -79,6 +79,7 @@ func (c *CodeHost) LinkedEvents(
 	repos []domain.RepoRef,
 	policy domain.ReviewerPolicy,
 	keys []domain.IssueKey,
+	window domain.Window,
 ) (map[domain.IssueKey][]domain.Event, error) {
 	if len(keys) == 0 || len(repos) == 0 {
 		return nil, nil
@@ -88,28 +89,132 @@ func (c *CodeHost) LinkedEvents(
 	results := map[domain.IssueKey][]domain.Event{}
 	var mu sync.Mutex
 
+	record := func(key domain.IssueKey, events []domain.Event) {
+		mu.Lock()
+		results[key] = append(results[key], events...)
+		mu.Unlock()
+	}
+
 	for _, repo := range repos {
-		branches, err := c.matchingBranches(ctx, repo, keys, matcher)
+		// Pull requests are found first, and by issue key rather than by
+		// branch. A merged pull request usually has no branch left — deleting
+		// the head on merge is the default — so anything branch-led would go
+		// blind on exactly the work that finished.
+		pulls, err := c.pullsInWindow(ctx, repo, window, matcher)
 		if err != nil {
 			return nil, err
 		}
 
-		err = forEachBounded(ctx, branches, maxConcurrency, func(ctx context.Context, match branchMatch) error {
-			events, err := c.eventsForBranch(ctx, repo, match, policy)
+		covered := make(map[string]struct{}, len(pulls))
+		for _, pull := range pulls {
+			covered[pull.pull.Head.Ref] = struct{}{}
+		}
+
+		// Branches still standing that no pull request covers. This is work in
+		// progress: a branch exists, review has not started.
+		branches, err := c.matchingBranches(ctx, repo, keys, matcher)
+		if err != nil {
+			return nil, err
+		}
+		orphans := branches[:0:0]
+		for _, branch := range branches {
+			if _, ok := covered[branch.name]; !ok {
+				orphans = append(orphans, branch)
+			}
+		}
+
+		if err := forEachBounded(ctx, pulls, maxConcurrency, func(ctx context.Context, match pullMatch) error {
+			events, err := c.eventsForPullRequest(ctx, repo, match.pull, policy)
 			if err != nil {
 				return err
 			}
-			mu.Lock()
-			results[match.key] = append(results[match.key], events...)
-			mu.Unlock()
+			record(match.key, events)
 			return nil
-		})
-		if err != nil {
+		}); err != nil {
+			return nil, err
+		}
+
+		if err := forEachBounded(ctx, orphans, maxConcurrency, func(ctx context.Context, match branchMatch) error {
+			firstSeen, err := c.branchFirstSeen(ctx, repo, match.name)
+			if err != nil {
+				return err
+			}
+			record(match.key, []domain.Event{
+				domain.BranchFirstSeen{At: firstSeen, Name: repo.String() + ":" + match.name},
+			})
+			return nil
+		}); err != nil {
 			return nil, err
 		}
 	}
 
 	return results, nil
+}
+
+type pullMatch struct {
+	key  domain.IssueKey
+	pull pullJSON
+}
+
+// pullLookback is how far before a sprint the pull request scan reaches. A pull
+// request opened well before the sprint and left untouched still describes the
+// state the sprint opened in, so the scan cannot stop at the sprint boundary.
+const pullLookback = 120 * 24 * time.Hour
+
+// maxPullPages bounds the scan. Reaching it means the repository saw more than
+// 2000 pull requests in the window, at which point the oldest are far enough
+// outside it not to matter.
+const maxPullPages = 20
+
+// pullsInWindow lists the repository's pull requests touching the sprint window
+// and keeps those naming an issue we care about.
+//
+// Matching considers the head branch first and the title second. The branch is
+// the reliable signal while it exists; the title is what survives a squash
+// merge, where the message becomes "Title (#123)" and the branch is deleted.
+func (c *CodeHost) pullsInWindow(ctx context.Context, repo domain.RepoRef, window domain.Window, matcher keyMatcher) ([]pullMatch, error) {
+	cutoff := window.Start.Add(-pullLookback)
+	var matches []pullMatch
+
+	for page := 1; page <= maxPullPages; page++ {
+		query := url.Values{
+			"state":     {"all"},
+			"sort":      {"updated"},
+			"direction": {"desc"},
+			"per_page":  {"100"},
+			"page":      {strconv.Itoa(page)},
+		}
+		var pulls []pullJSON
+		path := "/repos/" + url.PathEscape(repo.Owner) + "/" + url.PathEscape(repo.Name) + "/pulls"
+		if err := c.client.DoJSON(ctx, c.request(path, query), &pulls); err != nil {
+			return nil, fmt.Errorf("listing pull requests for %s: %w", repo, err)
+		}
+
+		exhausted := false
+		for _, pull := range pulls {
+			if pull.UpdatedAt.Before(cutoff) {
+				// Sorted newest-first, so everything after this is older still.
+				exhausted = true
+				break
+			}
+			if pull.CreatedAt.After(window.End) {
+				// Opened after the sprint closed; nothing it did is in frame.
+				continue
+			}
+			key, ok := matcher.match(pull.Head.Ref)
+			if !ok {
+				key, ok = matcher.match(pull.Title)
+			}
+			if ok {
+				matches = append(matches, pullMatch{key: key, pull: pull})
+			}
+		}
+
+		if exhausted || len(pulls) < 100 {
+			break
+		}
+	}
+	return matches, nil
 }
 
 type branchMatch struct {
@@ -217,33 +322,6 @@ func queryPrefixes(keys []domain.IssueKey) []string {
 	return out
 }
 
-func (c *CodeHost) eventsForBranch(
-	ctx context.Context,
-	repo domain.RepoRef,
-	match branchMatch,
-	policy domain.ReviewerPolicy,
-) ([]domain.Event, error) {
-	firstSeen, err := c.branchFirstSeen(ctx, repo, match.name)
-	if err != nil {
-		return nil, err
-	}
-
-	events := []domain.Event{domain.BranchFirstSeen{At: firstSeen, Name: repo.String() + ":" + match.name}}
-
-	pulls, err := c.pullsForBranch(ctx, repo, match.name)
-	if err != nil {
-		return nil, err
-	}
-	for _, pull := range pulls {
-		pullEvents, err := c.eventsForPull(ctx, repo, pull, policy)
-		if err != nil {
-			return nil, err
-		}
-		events = append(events, pullEvents...)
-	}
-	return events, nil
-}
-
 // branchFirstSeen approximates when a branch came into existence.
 //
 // GitHub records no branch-creation timestamp, so the earliest commit unique to
@@ -287,21 +365,7 @@ func (c *CodeHost) defaultBranch(ctx context.Context, repo domain.RepoRef) (stri
 	return details.DefaultBranch, nil
 }
 
-func (c *CodeHost) pullsForBranch(ctx context.Context, repo domain.RepoRef, branch string) ([]pullJSON, error) {
-	query := url.Values{
-		"head":     {repo.Owner + ":" + branch},
-		"state":    {"all"},
-		"per_page": {"100"},
-	}
-	var pulls []pullJSON
-	path := "/repos/" + url.PathEscape(repo.Owner) + "/" + url.PathEscape(repo.Name) + "/pulls"
-	if err := c.client.DoJSON(ctx, c.request(path, query), &pulls); err != nil {
-		return nil, fmt.Errorf("listing pull requests for %s in %s: %w", branch, repo, err)
-	}
-	return pulls, nil
-}
-
-func (c *CodeHost) eventsForPull(
+func (c *CodeHost) eventsForPullRequest(
 	ctx context.Context,
 	repo domain.RepoRef,
 	pull pullJSON,
@@ -318,14 +382,44 @@ func (c *CodeHost) eventsForPull(
 		return nil, err
 	}
 
-	events := []domain.Event{domain.PROpened{
+	// The branch existed from its first commit, which the pull request still
+	// records after the branch itself is gone.
+	events := []domain.Event{}
+	if firstCommit, err := c.firstCommitOf(ctx, repo, pull.Number); err != nil {
+		return nil, err
+	} else if !firstCommit.IsZero() {
+		events = append(events, domain.BranchFirstSeen{
+			At:   firstCommit,
+			Name: repo.String() + ":" + pull.Head.Ref,
+		})
+	}
+
+	events = append(events, domain.PROpened{
 		At:    pull.CreatedAt,
 		PR:    key,
 		Draft: draftAtCreation(pull, timeline),
-	}}
+	})
 	events = append(events, timelineEvents(key, timeline, policy)...)
 	events = append(events, reviewEvents(key, reviews, policy)...)
 	return events, nil
+}
+
+// firstCommitOf returns when the earliest commit on a pull request was made.
+// The commits endpoint lists them oldest first, and it keeps working after the
+// head branch is deleted — which is why it is preferred over comparing refs.
+func (c *CodeHost) firstCommitOf(ctx context.Context, repo domain.RepoRef, number int) (time.Time, error) {
+	query := url.Values{"per_page": {"1"}, "page": {"1"}}
+	path := "/repos/" + url.PathEscape(repo.Owner) + "/" + url.PathEscape(repo.Name) +
+		"/pulls/" + strconv.Itoa(number) + "/commits"
+
+	var commits []commitJSON
+	if err := c.client.DoJSON(ctx, c.request(path, query), &commits); err != nil {
+		return time.Time{}, fmt.Errorf("reading commits for %s#%d: %w", repo, number, err)
+	}
+	if len(commits) == 0 {
+		return time.Time{}, nil
+	}
+	return commits[0].Commit.Committer.Date, nil
 }
 
 func (c *CodeHost) timelineFor(ctx context.Context, repo domain.RepoRef, number int) ([]timelineEventJSON, error) {

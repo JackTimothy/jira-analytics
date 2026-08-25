@@ -16,6 +16,26 @@ import (
 
 var testRepo = domain.RepoRef{Owner: "org", Name: "repo"}
 
+var testGitHubWindow = domain.Window{
+	Start: time.Date(2026, 8, 3, 9, 0, 0, 0, time.UTC),
+	End:   time.Date(2026, 8, 17, 9, 0, 0, 0, time.UTC),
+}
+
+// A merged pull request whose branch has been deleted — the ordinary state of
+// finished work — alongside one whose branch still exists, and one belonging to
+// nobody we asked about.
+const pullListFixture = `[
+	{"number":7,"title":"OTCO-9999 unrelated","draft":false,
+	 "created_at":"2026-08-06T09:00:00Z","updated_at":"2026-08-10T09:00:00Z",
+	 "head":{"ref":"OTCO-9999-other-team"}},
+	{"number":8,"title":"PROJ-11-api","draft":true,
+	 "created_at":"2026-08-07T09:00:00Z","updated_at":"2026-08-07T09:00:00Z",
+	 "head":{"ref":"PROJ-11-api"}},
+	{"number":9,"title":"PROJ-10-add-picker-and-align-shared-routes (#4683)","draft":false,
+	 "created_at":"2026-08-06T09:00:00Z","updated_at":"2026-08-10T09:00:00Z",
+	 "merged_at":"2026-08-10T09:00:00Z","head":{"ref":"deleted-branch-name"}}
+]`
+
 // fixtures trimmed from real GitHub responses.
 var fixtures = map[string]string{
 	"/repos/org/repo": `{"default_branch":"dev"}`,
@@ -34,11 +54,11 @@ var fixtures = map[string]string{
 	"/repos/org/repo/compare/dev...PROJ-11-api": `{"commits":[
 		{"commit":{"committer":{"date":"2026-08-06T13:00:00Z"}}}]}`,
 
-	"/repos/org/repo/pulls/7/reviews": `[
+	"/repos/org/repo/pulls/9/reviews": `[
 		{"user":{"login":"alice","type":"User"},"state":"CHANGES_REQUESTED","submitted_at":"2026-08-08T10:00:00Z"},
 		{"user":{"login":"alice","type":"User"},"state":"APPROVED","submitted_at":"2026-08-09T10:00:00Z"},
 		{"user":{"login":"copilot-pull-request-reviewer[bot]","type":"Bot"},"state":"APPROVED","submitted_at":"2026-08-07T10:00:00Z"}]`,
-	"/repos/org/repo/issues/7/timeline": `[
+	"/repos/org/repo/issues/9/timeline": `[
 		{"event":"ready_for_review","created_at":"2026-08-07T09:00:00Z"},
 		{"event":"review_requested","created_at":"2026-08-07T09:05:00Z","requested_reviewer":{"login":"alice","type":"User"}},
 		{"event":"merged","created_at":"2026-08-10T09:00:00Z"},
@@ -46,6 +66,9 @@ var fixtures = map[string]string{
 
 	"/repos/org/repo/pulls/8/reviews":   `[]`,
 	"/repos/org/repo/issues/8/timeline": `[]`,
+
+	"/repos/org/repo/pulls/8/commits": `[{"commit":{"committer":{"date":"2026-08-06T13:00:00Z"}}}]`,
+	"/repos/org/repo/pulls/9/commits": `[{"commit":{"committer":{"date":"2026-08-04T13:00:00Z"}}}]`,
 }
 
 func newFakeGitHub(t *testing.T) (*CodeHost, *[]string) {
@@ -60,19 +83,12 @@ func newFakeGitHub(t *testing.T) (*CodeHost, *[]string) {
 			return
 		}
 
-		// The pull request listing is keyed by the head branch.
 		if r.URL.Path == "/repos/org/repo/pulls" {
-			switch r.URL.Query().Get("head") {
-			case "org:PROJ-10-add-picker":
-				io.WriteString(w, `[{"number":7,"title":"PROJ-10 add picker","draft":false,
-					"created_at":"2026-08-06T09:00:00Z","merged_at":"2026-08-10T09:00:00Z",
-					"head":{"ref":"PROJ-10-add-picker"}}]`)
-			case "org:PROJ-11-api":
-				io.WriteString(w, `[{"number":8,"title":"PROJ-11 api","draft":true,
-					"created_at":"2026-08-07T09:00:00Z","head":{"ref":"PROJ-11-api"}}]`)
-			default:
+			if r.URL.Query().Get("page") != "1" {
 				io.WriteString(w, `[]`)
+				return
 			}
+			io.WriteString(w, pullListFixture)
 			return
 		}
 
@@ -101,6 +117,7 @@ func TestLinkedEventsBuildsATimelineFromBranchesPullsAndReviews(t *testing.T) {
 		[]domain.RepoRef{testRepo},
 		domain.ReviewerPolicy{ExcludeBots: true},
 		[]domain.IssueKey{"PROJ-10", "PROJ-11"},
+		testGitHubWindow,
 	)
 	if err != nil {
 		t.Fatalf("LinkedEvents: %v", err)
@@ -141,7 +158,7 @@ func TestLinkedEventsIgnoresBranchesWithNoRequestedKey(t *testing.T) {
 	host, seen := newFakeGitHub(t)
 
 	result, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
-		domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10"})
+		domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10"}, testGitHubWindow)
 	if err != nil {
 		t.Fatalf("LinkedEvents: %v", err)
 	}
@@ -160,7 +177,7 @@ func TestLinkedEventsExcludesBotApprovalsFromReviewStates(t *testing.T) {
 	host, _ := newFakeGitHub(t)
 
 	result, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
-		domain.ReviewerPolicy{ExcludeBots: true}, []domain.IssueKey{"PROJ-10"})
+		domain.ReviewerPolicy{ExcludeBots: true}, []domain.IssueKey{"PROJ-10"}, testGitHubWindow)
 	if err != nil {
 		t.Fatalf("LinkedEvents: %v", err)
 	}
@@ -178,7 +195,7 @@ func TestLinkedEventsReadsTheDefaultBranchOncePerRepo(t *testing.T) {
 	host, seen := newFakeGitHub(t)
 
 	if _, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
-		domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10", "PROJ-11"}); err != nil {
+		domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10", "PROJ-11"}, testGitHubWindow); err != nil {
 		t.Fatalf("LinkedEvents: %v", err)
 	}
 
@@ -196,10 +213,10 @@ func TestLinkedEventsReadsTheDefaultBranchOncePerRepo(t *testing.T) {
 func TestLinkedEventsSkipsWorkWhenThereIsNothingToLink(t *testing.T) {
 	host, seen := newFakeGitHub(t)
 
-	if _, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo}, domain.ReviewerPolicy{}, nil); err != nil {
+	if _, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo}, domain.ReviewerPolicy{}, nil, testGitHubWindow); err != nil {
 		t.Fatalf("LinkedEvents: %v", err)
 	}
-	if _, err := host.LinkedEvents(context.Background(), nil, domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10"}); err != nil {
+	if _, err := host.LinkedEvents(context.Background(), nil, domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10"}, testGitHubWindow); err != nil {
 		t.Fatalf("LinkedEvents: %v", err)
 	}
 	if len(*seen) != 0 {
@@ -218,7 +235,7 @@ func TestLinkedEventsReportsFailures(t *testing.T) {
 		httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })))
 
 	_, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
-		domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10"})
+		domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10"}, testGitHubWindow)
 	if err == nil {
 		t.Fatal("expected an error rather than a silently empty result")
 	}
@@ -290,7 +307,7 @@ func TestMatchingBranchesRejectsRawPrefixFalsePositives(t *testing.T) {
 	// PROJ-110 shares a character prefix with PROJ-11 but is a different issue,
 	// and nobody asked about it.
 	result, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
-		domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10", "PROJ-11"})
+		domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10", "PROJ-11"}, testGitHubWindow)
 	if err != nil {
 		t.Fatalf("LinkedEvents: %v", err)
 	}
@@ -312,7 +329,7 @@ func TestMatchingBranchesQueriesOncePerProjectPrefixNotOncePerIssue(t *testing.T
 	host, seen := newFakeGitHub(t)
 
 	if _, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
-		domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10", "PROJ-11"}); err != nil {
+		domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10", "PROJ-11"}, testGitHubWindow); err != nil {
 		t.Fatalf("LinkedEvents: %v", err)
 	}
 
@@ -337,4 +354,123 @@ func keysOf(m map[domain.IssueKey][]domain.Event) []domain.IssueKey {
 		out = append(out, key)
 	}
 	return out
+}
+
+// A squash merge leaves "Title (#123)" as the commit message and, by default,
+// deletes the head branch. Discovery that starts from branches goes blind on
+// precisely the work that finished, so this is the case that matters most.
+func TestLinkedEventsFindsMergedWorkAfterItsBranchIsDeleted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/repos/org/repo":
+			io.WriteString(w, `{"default_branch":"dev"}`)
+
+		// No branches at all: every one has been deleted on merge.
+		case strings.Contains(r.URL.Path, "/git/matching-refs/"):
+			io.WriteString(w, `[]`)
+
+		case r.URL.Path == "/repos/org/repo/pulls":
+			if r.URL.Query().Get("page") != "1" {
+				io.WriteString(w, `[]`)
+				return
+			}
+			io.WriteString(w, `[{"number":4683,
+				"title":"OTCO-5854-Update-Balance-of-Plant-shared-routes-to-align-with-Asset-Models-shared-routes",
+				"draft":false,
+				"created_at":"2026-08-05T09:00:00Z","updated_at":"2026-08-10T09:00:00Z",
+				"merged_at":"2026-08-10T09:00:00Z",
+				"head":{"ref":"OTCO-5854-Update-Balance-of-Plant-shared-routes"}}]`)
+
+		case r.URL.Path == "/repos/org/repo/pulls/4683/commits":
+			io.WriteString(w, `[{"commit":{"committer":{"date":"2026-08-04T13:00:00Z"}}}]`)
+
+		case r.URL.Path == "/repos/org/repo/issues/4683/timeline":
+			io.WriteString(w, `[{"event":"review_requested","created_at":"2026-08-06T09:00:00Z",
+				"requested_reviewer":{"login":"alice","type":"User"}},
+				{"event":"merged","created_at":"2026-08-10T09:00:00Z"},
+				{"event":"closed","created_at":"2026-08-10T09:00:00Z"}]`)
+
+		case r.URL.Path == "/repos/org/repo/pulls/4683/reviews":
+			io.WriteString(w, `[{"user":{"login":"alice","type":"User"},"state":"APPROVED",
+				"submitted_at":"2026-08-09T10:00:00Z"}]`)
+
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"message":"no fixture for `+r.URL.Path+`"}`)
+		}
+	}))
+	defer server.Close()
+
+	host := NewCodeHost(Config{BaseURL: server.URL, Token: "t"},
+		httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })))
+
+	result, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
+		domain.ReviewerPolicy{ExcludeBots: true}, []domain.IssueKey{"OTCO-5854"}, testGitHubWindow)
+	if err != nil {
+		t.Fatalf("LinkedEvents: %v", err)
+	}
+
+	events, ok := result["OTCO-5854"]
+	if !ok {
+		t.Fatal("the merged work was not found — branch-led discovery would miss it entirely")
+	}
+
+	intervals := domain.BuildTimeline(events, domain.IssueStatus{Name: "To Do"},
+		time.Date(2026, 8, 1, 9, 0, 0, 0, time.UTC), testGitHubWindow)
+
+	want := []domain.State{
+		domain.StateToDo,
+		domain.StateInProgress,      // first commit on the branch
+		domain.StateReviewRequested, // alice asked
+		domain.StateApproved,        // alice approved
+		domain.StateDone,            // merged
+	}
+	if len(intervals) != len(want) {
+		t.Fatalf("got %d intervals, want %d: %+v", len(intervals), len(want), intervals)
+	}
+	for i, state := range want {
+		if intervals[i].State != state {
+			t.Errorf("interval %d = %s, want %s", i, intervals[i].State, state)
+		}
+	}
+}
+
+func TestLinkedEventsMatchesOnTitleWhenTheBranchNameDoesNot(t *testing.T) {
+	// Some branches are named without the key even though the title carries it.
+	host, _ := newFakeGitHub(t)
+
+	result, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
+		domain.ReviewerPolicy{ExcludeBots: true}, []domain.IssueKey{"PROJ-10"}, testGitHubWindow)
+	if err != nil {
+		t.Fatalf("LinkedEvents: %v", err)
+	}
+	// Pull request 9 has head "deleted-branch-name"; only its title says PROJ-10.
+	var sawMerge bool
+	for _, event := range result["PROJ-10"] {
+		if _, ok := event.(domain.PRMerged); ok {
+			sawMerge = true
+		}
+	}
+	if !sawMerge {
+		t.Error("a pull request matched only by title was not linked")
+	}
+}
+
+func TestPullsInWindowIgnoresWorkOutsideTheSprint(t *testing.T) {
+	host, _ := newFakeGitHub(t)
+	matcher := newKeyMatcher([]domain.IssueKey{"PROJ-10", "PROJ-11"})
+
+	// A window long after the fixture's pull requests: all are older than the
+	// lookback, so none should survive.
+	future := domain.Window{
+		Start: time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC),
+		End:   time.Date(2027, 6, 15, 0, 0, 0, 0, time.UTC),
+	}
+	matches, err := host.pullsInWindow(context.Background(), testRepo, future, matcher)
+	if err != nil {
+		t.Fatalf("pullsInWindow: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("got %d matches for a window with no activity: %+v", len(matches), matches)
+	}
 }

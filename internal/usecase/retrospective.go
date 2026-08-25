@@ -70,7 +70,7 @@ func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (do
 		return domain.Retrospective{}, fmt.Errorf("loading status history: %w", err)
 	}
 
-	codeEvents, err := r.code.LinkedEvents(ctx, project.Repos, project.Reviewers, subTaskKeys)
+	codeEvents, err := r.code.LinkedEvents(ctx, project.Repos, project.Reviewers, subTaskKeys, sprint.Window())
 	if err != nil {
 		return domain.Retrospective{}, fmt.Errorf("loading code activity: %w", err)
 	}
