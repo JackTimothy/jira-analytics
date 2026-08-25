@@ -24,10 +24,10 @@ projects:
 
     tracker:
       type: jira
+      # Sprints are read from this project's own issues, so the list contains
+      # only sprints your team actually worked in — never another team's that
+      # happens to share a board.
       projectKey: PROJ
-      # The Jira board whose sprints you want. Find it in the board URL:
-      # .../jira/software/c/projects/PROJ/boards/45 -> "45"
-      boardId: "45"
 
     # One or more repositories. Branches are linked to sub-tasks by the issue
     # key appearing in the branch name, which is what Jira's "Create branch"

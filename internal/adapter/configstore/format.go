@@ -86,9 +86,6 @@ func (p projectFormat) toDomain() (domain.Project, error) {
 	if strings.TrimSpace(p.Tracker.ProjectKey) == "" {
 		return domain.Project{}, fmt.Errorf("tracker.projectKey is required")
 	}
-	if strings.TrimSpace(p.Tracker.BoardID) == "" {
-		return domain.Project{}, fmt.Errorf("tracker.boardId is required to list sprints")
-	}
 	if len(p.Repos) == 0 {
 		return domain.Project{}, fmt.Errorf("at least one repo is required")
 	}

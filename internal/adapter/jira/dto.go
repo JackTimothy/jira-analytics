@@ -1,6 +1,8 @@
 package jira
 
 import (
+	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +23,17 @@ type sprintJSON struct {
 	State     string `json:"state"`
 	StartDate string `json:"startDate"`
 	EndDate   string `json:"endDate"`
+}
+
+// sprintFieldSchema identifies the sprint custom field across Jira sites, whose
+// numeric field ids differ.
+const sprintFieldSchema = "com.pyxis.greenhopper.jira:gh-sprint"
+
+type fieldJSON struct {
+	ID     string `json:"id"`
+	Schema struct {
+		Custom string `json:"custom"`
+	} `json:"schema"`
 }
 
 type issuePage struct {
@@ -119,4 +132,21 @@ func parseTime(value string) (time.Time, error) {
 		return parsed, nil
 	}
 	return time.Parse(time.RFC3339, value)
+}
+
+func (s sprintJSON) toDomain() (domain.Sprint, error) {
+	start, err := parseTime(s.StartDate)
+	if err != nil {
+		return domain.Sprint{}, fmt.Errorf("sprint %d start date: %w", s.ID, err)
+	}
+	end, err := parseTime(s.EndDate)
+	if err != nil {
+		return domain.Sprint{}, fmt.Errorf("sprint %d end date: %w", s.ID, err)
+	}
+	return domain.Sprint{
+		ID:    domain.SprintID(strconv.Itoa(s.ID)),
+		Name:  s.Name,
+		Start: start,
+		End:   end,
+	}, nil
 }

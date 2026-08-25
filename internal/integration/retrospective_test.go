@@ -36,31 +36,7 @@ import (
 // PROJ-3 carried over from an earlier sprint and keeps its original due date,
 // so it must still count as committed.
 var jiraRoutes = map[string]string{
-	"/rest/agile/1.0/board/45/sprint": `{"isLast":true,"values":[
-		{"id":7354,"name":"Sprint 26-31","state":"closed",
-		 "startDate":"2026-08-03T13:00:00.000Z","endDate":"2026-08-17T18:00:00.000Z"}]}`,
-
-	"/rest/agile/1.0/sprint/7354/issue": `{"startAt":0,"maxResults":100,"total":3,"issues":[
-		{"key":"PROJ-1","fields":{"summary":"Committed story","duedate":"2026-08-17",
-		 "created":"2026-07-27T14:16:31.828-0400","issuetype":{"subtask":false},
-		 "status":{"id":"10009","name":"Review","statusCategory":{"key":"indeterminate"}}}},
-		{"key":"PROJ-2","fields":{"summary":"Pulled in mid-sprint","duedate":null,
-		 "created":"2026-08-05T09:00:00.000-0400","issuetype":{"subtask":false},
-		 "status":{"id":"3","name":"In Progress","statusCategory":{"key":"indeterminate"}}}},
-		{"key":"PROJ-3","fields":{"summary":"Carried over","duedate":"2026-08-03",
-		 "created":"2026-07-10T09:00:00.000-0400","issuetype":{"subtask":false},
-		 "status":{"id":"3","name":"In Progress","statusCategory":{"key":"indeterminate"}}}}]}`,
-
-	"/rest/api/3/search/jql": `{"issues":[
-		{"key":"PROJ-10","fields":{"summary":"Build the API","created":"2026-07-28T09:00:00.000-0400",
-		 "issuetype":{"subtask":true},"parent":{"key":"PROJ-1"},
-		 "status":{"id":"10024","name":"Done","statusCategory":{"key":"done"}}}},
-		{"key":"PROJ-11","fields":{"summary":"Build the UI","created":"2026-07-28T09:00:00.000-0400",
-		 "issuetype":{"subtask":true},"parent":{"key":"PROJ-1"},
-		 "status":{"id":"10009","name":"Review","statusCategory":{"key":"indeterminate"}}}},
-		{"key":"PROJ-20","fields":{"summary":"No code needed","created":"2026-08-05T09:00:00.000-0400",
-		 "issuetype":{"subtask":true},"parent":{"key":"PROJ-2"},
-		 "status":{"id":"10039","name":"To Do","statusCategory":{"key":"new"}}}}]}`,
+	"/rest/api/3/field": `[{"id":"customfield_10020","schema":{"custom":"com.pyxis.greenhopper.jira:gh-sprint"}}]`,
 
 	"/rest/api/3/status": `[
 		{"id":"10039","name":"To Do","statusCategory":{"key":"new"}},
@@ -75,6 +51,54 @@ var jiraRoutes = map[string]string{
 		{"created":"2026-08-04T09:00:00.000-0400","items":[
 			{"field":"status","from":"10039","fromString":"To Do","to":"3","toString":"In Progress"}]}]}`,
 	"/rest/api/3/issue/PROJ-20/changelog": `{"isLast":true,"values":[]}`,
+}
+
+// The three JQL queries share one endpoint, so the fake routes on the query
+// itself — which also asserts, implicitly, that each one is scoped as intended.
+const sprintScanResponse = `{"issues":[
+	{"key":"PROJ-1","fields":{"customfield_10020":[
+		{"id":7354,"name":"Sprint 26-31","state":"closed",
+		 "startDate":"2026-08-03T13:00:00.000Z","endDate":"2026-08-17T18:00:00.000Z"}]}}]}`
+
+const sprintParentsResponse = `{"issues":[
+	{"key":"PROJ-1","fields":{"summary":"Committed story","duedate":"2026-08-17",
+	 "created":"2026-07-27T14:16:31.828-0400","issuetype":{"subtask":false},
+	 "status":{"id":"10009","name":"Review","statusCategory":{"key":"indeterminate"}}}},
+	{"key":"PROJ-2","fields":{"summary":"Pulled in mid-sprint","duedate":null,
+	 "created":"2026-08-05T09:00:00.000-0400","issuetype":{"subtask":false},
+	 "status":{"id":"3","name":"In Progress","statusCategory":{"key":"indeterminate"}}}},
+	{"key":"PROJ-3","fields":{"summary":"Carried over","duedate":"2026-08-03",
+	 "created":"2026-07-10T09:00:00.000-0400","issuetype":{"subtask":false},
+	 "status":{"id":"3","name":"In Progress","statusCategory":{"key":"indeterminate"}}}}]}`
+
+const subTasksResponse = `{"issues":[
+	{"key":"PROJ-10","fields":{"summary":"Build the API","created":"2026-07-28T09:00:00.000-0400",
+	 "issuetype":{"subtask":true},"parent":{"key":"PROJ-1"},
+	 "status":{"id":"10024","name":"Done","statusCategory":{"key":"done"}}}},
+	{"key":"PROJ-11","fields":{"summary":"Build the UI","created":"2026-07-28T09:00:00.000-0400",
+	 "issuetype":{"subtask":true},"parent":{"key":"PROJ-1"},
+	 "status":{"id":"10009","name":"Review","statusCategory":{"key":"indeterminate"}}}},
+	{"key":"PROJ-20","fields":{"summary":"No code needed","created":"2026-08-05T09:00:00.000-0400",
+	 "issuetype":{"subtask":true},"parent":{"key":"PROJ-2"},
+	 "status":{"id":"10039","name":"To Do","statusCategory":{"key":"new"}}}}]}`
+
+func routeJQL(body []byte) (string, bool) {
+	var request struct {
+		JQL string `json:"jql"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return "", false
+	}
+	switch {
+	case strings.Contains(request.JQL, "sprint IS NOT EMPTY"):
+		return sprintScanResponse, true
+	case strings.HasPrefix(request.JQL, "sprint = "):
+		return sprintParentsResponse, true
+	case strings.HasPrefix(request.JQL, "parent IN "):
+		return subTasksResponse, true
+	default:
+		return "", false
+	}
 }
 
 var githubRoutes = map[string]string{
@@ -106,6 +130,17 @@ func fakeAPI(t *testing.T, routes map[string]string) *httptest.Server {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// The pull request listing is keyed by query string, not by path.
 		if body, handled := routeByQuery(r); handled {
+			io.WriteString(w, body)
+			return
+		}
+		if r.Method == http.MethodPost && r.URL.Path == "/rest/api/3/search/jql" {
+			raw, _ := io.ReadAll(r.Body)
+			body, ok := routeJQL(raw)
+			if !ok {
+				w.WriteHeader(http.StatusBadRequest)
+				io.WriteString(w, `{"errorMessages":["unrouted jql"]}`)
+				return
+			}
 			io.WriteString(w, body)
 			return
 		}
@@ -149,7 +184,7 @@ projects:
   - id: team
     name: Team
     settings: { timezone: America/New_York }
-    tracker: { type: jira, projectKey: PROJ, boardId: "45" }
+    tracker: { type: jira, projectKey: PROJ }
     repos:
       - { host: github, owner: acme, name: service }
     reviewers: { excludeBots: true }

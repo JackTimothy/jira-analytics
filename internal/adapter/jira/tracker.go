@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jacktimothy/jira-analytics/internal/domain"
 	"github.com/jacktimothy/jira-analytics/internal/infra/httpclient"
@@ -35,7 +36,26 @@ type Tracker struct {
 	// status to a category requires this lookup.
 	statusMu sync.Mutex
 	statuses map[string]domain.IssueStatus
+
+	// sprintFieldMu guards the discovered id of the sprint custom field, which
+	// is numbered differently on every Jira site.
+	sprintFieldMu sync.Mutex
+	sprintField   string
+
+	// sprintsMu guards the per-project sprint list. Building it costs one
+	// request per hundred issues, and the answer changes at most once a sprint.
+	sprintsMu sync.Mutex
+	sprints   map[string]sprintCacheEntry
 }
+
+type sprintCacheEntry struct {
+	sprints []domain.Sprint
+	at      time.Time
+}
+
+// sprintCacheTTL is short enough that a newly created sprint appears without a
+// restart, long enough that repeated navigation does not rescan the project.
+const sprintCacheTTL = 5 * time.Minute
 
 func NewTracker(config Config, client *httpclient.Client) *Tracker {
 	return &Tracker{config: config, client: client}
@@ -80,97 +100,213 @@ func (t *Tracker) request(method, path string, query url.Values, body any) func(
 	}
 }
 
-// ListSprints returns a board's sprints, most recently started first.
+// ListSprints returns the sprints the project's own work actually belongs to,
+// most recently started first.
+//
+// It reads the sprints off the project's issues rather than off a board. A
+// board's sprint list is the board's, not the project's: a long-lived or shared
+// board carries sprints belonging to other teams entirely, and there is no way
+// to tell from the board endpoint which is which. Sprint membership recorded on
+// an issue is unambiguous, so scoping by it is correct by construction.
+//
+// The scan is cached, because it costs one request per hundred issues and the
+// set of sprints changes at most once a fortnight.
 func (t *Tracker) ListSprints(ctx context.Context, tracker domain.TrackerRef) ([]domain.Sprint, error) {
-	var sprints []domain.Sprint
-
-	for startAt := 0; ; startAt += pageSize {
-		query := url.Values{
-			"startAt":    {strconv.Itoa(startAt)},
-			"maxResults": {strconv.Itoa(pageSize)},
-		}
-		var page sprintPage
-		path := "/rest/agile/1.0/board/" + url.PathEscape(tracker.BoardID) + "/sprint"
-		if err := t.client.DoJSON(ctx, t.request(http.MethodGet, path, query, nil), &page); err != nil {
-			return nil, err
-		}
-
-		for _, raw := range page.Values {
-			sprint, err := raw.toDomain()
-			if err != nil {
-				return nil, err
-			}
-			// A sprint with no dates cannot bound a timeline, and a future
-			// sprint that has never started has none. Skipping is correct;
-			// failing would make the whole list unusable.
-			if sprint.Start.IsZero() || sprint.End.IsZero() {
-				continue
-			}
-			sprints = append(sprints, sprint)
-		}
-
-		if page.IsLast || len(page.Values) == 0 {
-			break
-		}
+	if cached, ok := t.cachedSprints(tracker.ProjectKey); ok {
+		return cached, nil
 	}
 
-	sort.SliceStable(sprints, func(i, j int) bool { return sprints[i].Start.After(sprints[j].Start) })
+	field, err := t.sprintFieldID(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	jql := fmt.Sprintf("project = %q AND sprint IS NOT EMPTY ORDER BY created ASC", tracker.ProjectKey)
+	byID := map[int]domain.Sprint{}
+
+	err = t.eachSearchPage(ctx, jql, []string{field}, func(issues []issueJSON, raw []json.RawMessage) error {
+		for _, entry := range raw {
+			for _, sprint := range sprintsInIssue(entry, field) {
+				converted, err := sprint.toDomain()
+				if err != nil {
+					return err
+				}
+				// A sprint with no dates cannot bound a timeline. Future sprints
+				// that have never been started are the usual case.
+				if converted.Start.IsZero() || converted.End.IsZero() {
+					continue
+				}
+				byID[sprint.ID] = converted
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sprints := make([]domain.Sprint, 0, len(byID))
+	for _, sprint := range byID {
+		sprints = append(sprints, sprint)
+	}
+	sort.SliceStable(sprints, func(i, j int) bool {
+		if !sprints[i].Start.Equal(sprints[j].Start) {
+			return sprints[i].Start.After(sprints[j].Start)
+		}
+		return sprints[i].ID < sprints[j].ID
+	})
+
+	t.storeSprints(tracker.ProjectKey, sprints)
 	return sprints, nil
 }
 
-func (s sprintJSON) toDomain() (domain.Sprint, error) {
-	start, err := parseTime(s.StartDate)
-	if err != nil {
-		return domain.Sprint{}, fmt.Errorf("sprint %d start date: %w", s.ID, err)
+// sprintsInIssue pulls the sprint objects out of an issue's sprint custom
+// field. The field id differs per Jira site, so it is resolved at runtime and
+// the raw JSON is decoded here rather than being given a fixed struct tag.
+func sprintsInIssue(raw json.RawMessage, field string) []sprintJSON {
+	var envelope struct {
+		Fields map[string]json.RawMessage `json:"fields"`
 	}
-	end, err := parseTime(s.EndDate)
-	if err != nil {
-		return domain.Sprint{}, fmt.Errorf("sprint %d end date: %w", s.ID, err)
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return nil
 	}
-	return domain.Sprint{
-		ID:    domain.SprintID(strconv.Itoa(s.ID)),
-		Name:  s.Name,
-		Start: start,
-		End:   end,
-	}, nil
+	value, ok := envelope.Fields[field]
+	if !ok {
+		return nil
+	}
+	var sprints []sprintJSON
+	if err := json.Unmarshal(value, &sprints); err != nil {
+		return nil
+	}
+	return sprints
 }
 
-// SprintParents returns the parent-level work items in a sprint.
-//
-// Sub-tasks carry no sprint field of their own — they inherit membership from
-// their parent — so this deliberately returns only non-sub-task issues, and the
-// sub-tasks are fetched by parent afterwards.
-func (t *Tracker) SprintParents(ctx context.Context, _ domain.TrackerRef, sprint domain.SprintID) ([]domain.WorkItem, error) {
-	var parents []domain.WorkItem
+// sprintFieldID finds the sprint custom field for this site. Its numeric id is
+// site-specific, so it is discovered by its well-known schema rather than
+// hard-coded.
+func (t *Tracker) sprintFieldID(ctx context.Context) (string, error) {
+	t.sprintFieldMu.Lock()
+	defer t.sprintFieldMu.Unlock()
 
-	for startAt := 0; ; startAt += pageSize {
-		query := url.Values{
-			"startAt":    {strconv.Itoa(startAt)},
-			"maxResults": {strconv.Itoa(pageSize)},
-			"fields":     {"summary,duedate,created,status,issuetype"},
-		}
-		var page issuePage
-		path := "/rest/agile/1.0/sprint/" + url.PathEscape(string(sprint)) + "/issue"
-		if err := t.client.DoJSON(ctx, t.request(http.MethodGet, path, query, nil), &page); err != nil {
-			return nil, err
-		}
+	if t.sprintField != "" {
+		return t.sprintField, nil
+	}
 
-		for _, issue := range page.Issues {
-			if issue.Fields.IssueType.Subtask {
-				continue
-			}
-			item, err := issue.toWorkItem()
-			if err != nil {
-				return nil, err
-			}
-			parents = append(parents, item)
-		}
-
-		if len(page.Issues) < pageSize || startAt+len(page.Issues) >= page.Total {
-			break
+	var fields []fieldJSON
+	if err := t.client.DoJSON(ctx, t.request(http.MethodGet, "/rest/api/3/field", nil, nil), &fields); err != nil {
+		return "", fmt.Errorf("loading field definitions: %w", err)
+	}
+	for _, field := range fields {
+		if field.Schema.Custom == sprintFieldSchema {
+			t.sprintField = field.ID
+			return t.sprintField, nil
 		}
 	}
+	return "", fmt.Errorf("this Jira site has no sprint field (looked for schema %q)", sprintFieldSchema)
+}
+
+func (t *Tracker) cachedSprints(projectKey string) ([]domain.Sprint, bool) {
+	t.sprintsMu.Lock()
+	defer t.sprintsMu.Unlock()
+
+	entry, ok := t.sprints[projectKey]
+	if !ok || time.Since(entry.at) > sprintCacheTTL {
+		return nil, false
+	}
+	out := make([]domain.Sprint, len(entry.sprints))
+	copy(out, entry.sprints)
+	return out, true
+}
+
+func (t *Tracker) storeSprints(projectKey string, sprints []domain.Sprint) {
+	t.sprintsMu.Lock()
+	defer t.sprintsMu.Unlock()
+
+	if t.sprints == nil {
+		t.sprints = map[string]sprintCacheEntry{}
+	}
+	stored := make([]domain.Sprint, len(sprints))
+	copy(stored, sprints)
+	t.sprints[projectKey] = sprintCacheEntry{sprints: stored, at: time.Now()}
+}
+
+// SprintParents returns the parent-level work items a project had in a sprint.
+//
+// The query is scoped to the project, not just the sprint. A sprint on a shared
+// board contains other teams' issues too, and a retrospective that silently
+// mixed them in would be worse than useless.
+//
+// Sub-tasks are excluded because they carry no sprint field of their own — they
+// inherit membership from their parent — and are fetched by parent afterwards.
+func (t *Tracker) SprintParents(ctx context.Context, tracker domain.TrackerRef, sprint domain.SprintID) ([]domain.WorkItem, error) {
+	jql := fmt.Sprintf("sprint = %s AND project = %q ORDER BY key ASC", string(sprint), tracker.ProjectKey)
+
+	var parents []domain.WorkItem
+	err := t.eachSearchPage(ctx, jql, []string{"summary", "duedate", "created", "status", "issuetype"},
+		func(issues []issueJSON, _ []json.RawMessage) error {
+			for _, issue := range issues {
+				if issue.Fields.IssueType.Subtask {
+					continue
+				}
+				item, err := issue.toWorkItem()
+				if err != nil {
+					return err
+				}
+				parents = append(parents, item)
+			}
+			return nil
+		})
+	if err != nil {
+		return nil, err
+	}
 	return parents, nil
+}
+
+// eachSearchPage walks a JQL search, handing each page to fn. Both the decoded
+// issues and their raw JSON are passed, since custom fields are addressed by an
+// id discovered at runtime and cannot be given a struct tag.
+//
+// Paging is by the token the server returns, so there is no page arithmetic to
+// get wrong.
+func (t *Tracker) eachSearchPage(ctx context.Context, jql string, fields []string, fn func([]issueJSON, []json.RawMessage) error) error {
+	var pageToken string
+
+	for {
+		body := map[string]any{
+			"jql":        jql,
+			"maxResults": pageSize,
+			"fields":     fields,
+		}
+		if pageToken != "" {
+			body["nextPageToken"] = pageToken
+		}
+
+		var page struct {
+			Issues        []json.RawMessage `json:"issues"`
+			NextPageToken string            `json:"nextPageToken"`
+		}
+		if err := t.client.DoJSON(ctx, t.request(http.MethodPost, "/rest/api/3/search/jql", nil, body), &page); err != nil {
+			return fmt.Errorf("searching issues: %w", err)
+		}
+
+		issues := make([]issueJSON, 0, len(page.Issues))
+		for _, raw := range page.Issues {
+			var issue issueJSON
+			if err := json.Unmarshal(raw, &issue); err != nil {
+				return fmt.Errorf("decoding issue: %w", err)
+			}
+			issues = append(issues, issue)
+		}
+
+		if err := fn(issues, page.Issues); err != nil {
+			return err
+		}
+
+		if page.NextPageToken == "" || len(page.Issues) == 0 {
+			return nil
+		}
+		pageToken = page.NextPageToken
+	}
 }
 
 func (i issueJSON) toWorkItem() (domain.WorkItem, error) {
@@ -196,7 +332,7 @@ func (i issueJSON) toWorkItem() (domain.WorkItem, error) {
 	}, nil
 }
 
-// SubTasksOf fetches the sub-tasks of the given parents in one JQL query.
+// SubTasksOf fetches the sub-tasks of the given parents.
 func (t *Tracker) SubTasksOf(ctx context.Context, parents []domain.IssueKey) ([]domain.SubTask, error) {
 	if len(parents) == 0 {
 		return nil, nil
@@ -209,37 +345,20 @@ func (t *Tracker) SubTasksOf(ctx context.Context, parents []domain.IssueKey) ([]
 	jql := "parent IN (" + strings.Join(keys, ",") + ") ORDER BY key ASC"
 
 	var subTasks []domain.SubTask
-	var pageToken string
-
-	for {
-		body := map[string]any{
-			"jql":        jql,
-			"maxResults": pageSize,
-			"fields":     []string{"summary", "created", "status", "issuetype", "parent"},
-		}
-		if pageToken != "" {
-			body["nextPageToken"] = pageToken
-		}
-
-		var page issuePage
-		if err := t.client.DoJSON(ctx, t.request(http.MethodPost, "/rest/api/3/search/jql", nil, body), &page); err != nil {
-			return nil, err
-		}
-
-		for _, issue := range page.Issues {
-			subTask, err := issue.toSubTask()
-			if err != nil {
-				return nil, err
+	err := t.eachSearchPage(ctx, jql, []string{"summary", "created", "status", "issuetype", "parent"},
+		func(issues []issueJSON, _ []json.RawMessage) error {
+			for _, issue := range issues {
+				subTask, err := issue.toSubTask()
+				if err != nil {
+					return err
+				}
+				subTasks = append(subTasks, subTask)
 			}
-			subTasks = append(subTasks, subTask)
-		}
-
-		if page.NextPageToken == "" {
-			break
-		}
-		pageToken = page.NextPageToken
+			return nil
+		})
+	if err != nil {
+		return nil, err
 	}
-
 	return subTasks, nil
 }
 
@@ -293,7 +412,7 @@ func (t *Tracker) StatusHistory(ctx context.Context, keys []domain.IssueKey) (ma
 func (t *Tracker) changelogFor(ctx context.Context, key domain.IssueKey, statuses map[string]domain.IssueStatus) ([]domain.StatusChange, error) {
 	var changes []domain.StatusChange
 
-	for startAt := 0; ; startAt += pageSize {
+	for startAt := 0; ; {
 		query := url.Values{
 			"startAt":    {strconv.Itoa(startAt)},
 			"maxResults": {strconv.Itoa(pageSize)},
@@ -321,9 +440,13 @@ func (t *Tracker) changelogFor(ctx context.Context, key domain.IssueKey, statuse
 			}
 		}
 
+		// Advance by what the server actually returned, never by what was
+		// asked for. Jira caps maxResults per endpoint, so adding the requested
+		// page size would step straight over every entry it declined to send.
 		if page.IsLast || len(page.Values) == 0 {
 			break
 		}
+		startAt += len(page.Values)
 	}
 
 	sort.SliceStable(changes, func(i, j int) bool { return changes[i].At.Before(changes[j].At) })

@@ -79,11 +79,6 @@ func TestLoadRejectsBadConfiguration(t *testing.T) {
 			wantErr:  "unsupported tracker type",
 		},
 		{
-			name:     "missing board id",
-			contents: "projects:\n  - id: a\n    tracker: { type: jira, projectKey: X }\n    repos: [{host: github, owner: o, name: r}]\n",
-			wantErr:  "boardId is required",
-		},
-		{
 			name:     "no repos",
 			contents: "projects:\n  - id: a\n    tracker: { type: jira, projectKey: X, boardId: \"1\" }\n    repos: []\n",
 			wantErr:  "at least one repo is required",
@@ -195,5 +190,23 @@ func TestListReturnsACopy(t *testing.T) {
 	again, _ := store.List(context.Background())
 	if again[0].Name == "mutated" {
 		t.Error("List handed out a slice aliasing internal state")
+	}
+}
+
+func TestLoadAcceptsAProjectWithNoBoardID(t *testing.T) {
+	// Sprints are read from the project's own issues, so a board is no longer
+	// part of the configuration a deployment must supply.
+	store, _ := writeStore(t, `
+projects:
+  - id: a
+    tracker: { type: jira, projectKey: X }
+    repos: [{host: github, owner: o, name: r}]
+`)
+	project, err := store.Get(context.Background(), "a")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if project.Tracker.ProjectKey != "X" {
+		t.Errorf("unexpected tracker: %+v", project.Tracker)
 	}
 }

@@ -166,6 +166,21 @@ is the single worst pair under deuteranopia.
 A table view exists alongside the chart, and every state is labelled in the
 legend, so identity never rests on colour alone.
 
+### Which sprints appear
+
+Sprints are read from the project's own issues, not from a board. A board's
+sprint list belongs to the board: one that is shared, or simply old, carries
+sprints from other teams with nothing in the response to distinguish them.
+Sprint membership recorded on an issue is unambiguous, so scoping by it is
+correct by construction and needs no board configured.
+
+The scan costs one request per hundred issues and is cached for a few minutes,
+since the set of sprints changes at most once a sprint.
+
+Every issue query is scoped to the project for the same reason — a sprint on a
+shared board holds other teams' issues, and a retrospective that mixed them in
+would be worse than useless.
+
 ### Finding the branches
 
 Branch discovery leans on the convention that a branch name **begins** with its

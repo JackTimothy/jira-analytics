@@ -3,9 +3,12 @@ package jira
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,29 +47,41 @@ func newFakeJira(t *testing.T, routes map[string]string) (*Tracker, *[]string) {
 	return tracker, &seen
 }
 
-const sprintsFixture = `{
-  "isLast": true,
-  "values": [
-    {"id": 7354, "name": "Sprint 26-31", "state": "closed",
-     "startDate": "2026-07-29T16:00:35.925Z", "endDate": "2026-08-12T18:00:00.000Z"},
-    {"id": 7355, "name": "Sprint 26-33", "state": "active",
-     "startDate": "2026-08-12T15:24:38.877Z", "endDate": "2026-08-26T18:00:00.000Z"},
-    {"id": 7400, "name": "Future sprint, never started", "state": "future"}
+const fieldsFixture = `[
+  {"id": "summary", "schema": {"type": "string"}},
+  {"id": "customfield_10020", "schema": {"type": "array", "custom": "com.pyxis.greenhopper.jira:gh-sprint"}}
+]`
+
+// Two issues carrying overlapping sprint membership, exactly as Jira reports
+// it: an issue that carried over lists both sprints.
+const sprintScanFixture = `{
+  "issues": [
+    {"key": "PROJ-1", "fields": {"customfield_10020": [
+      {"id": 7354, "name": "Sprint 26-31", "state": "closed",
+       "startDate": "2026-07-29T16:00:35.925Z", "endDate": "2026-08-12T18:00:00.000Z"},
+      {"id": 7355, "name": "Sprint 26-33", "state": "active",
+       "startDate": "2026-08-12T15:24:38.877Z", "endDate": "2026-08-26T18:00:00.000Z"}]}},
+    {"key": "PROJ-2", "fields": {"customfield_10020": [
+      {"id": 7354, "name": "Sprint 26-31", "state": "closed",
+       "startDate": "2026-07-29T16:00:35.925Z", "endDate": "2026-08-12T18:00:00.000Z"},
+      {"id": 7400, "name": "Never started", "state": "future"}]}}
   ]
 }`
 
-func TestListSprintsOrdersMostRecentFirstAndSkipsUndatedSprints(t *testing.T) {
+func TestListSprintsReadsSprintsFromTheProjectsOwnIssues(t *testing.T) {
 	tracker, _ := newFakeJira(t, map[string]string{
-		"/rest/agile/1.0/board/45/sprint": sprintsFixture,
+		"/rest/api/3/field":      fieldsFixture,
+		"/rest/api/3/search/jql": sprintScanFixture,
 	})
 
-	sprints, err := tracker.ListSprints(context.Background(), domain.TrackerRef{BoardID: "45"})
+	sprints, err := tracker.ListSprints(context.Background(), domain.TrackerRef{ProjectKey: "PROJ"})
 	if err != nil {
 		t.Fatalf("ListSprints: %v", err)
 	}
 
+	// Deduplicated across issues, and the undated future sprint is unusable.
 	if len(sprints) != 2 {
-		t.Fatalf("got %d sprints, want 2 (the undated one is unusable)", len(sprints))
+		t.Fatalf("got %d sprints, want 2: %+v", len(sprints), sprints)
 	}
 	if sprints[0].ID != "7355" {
 		t.Errorf("first sprint = %s, want the most recently started", sprints[0].ID)
@@ -77,8 +92,50 @@ func TestListSprintsOrdersMostRecentFirstAndSkipsUndatedSprints(t *testing.T) {
 	}
 }
 
+func TestListSprintsNeverConsultsABoard(t *testing.T) {
+	// A board's sprint list belongs to the board, not the project: on a shared
+	// or long-lived board it carries other teams' sprints with no way to tell
+	// them apart. Reading membership off the project's issues is what keeps the
+	// list scoped, so the board endpoint must not be involved at all.
+	tracker, seen := newFakeJira(t, map[string]string{
+		"/rest/api/3/field":      fieldsFixture,
+		"/rest/api/3/search/jql": sprintScanFixture,
+	})
+
+	if _, err := tracker.ListSprints(context.Background(), domain.TrackerRef{ProjectKey: "PROJ"}); err != nil {
+		t.Fatalf("ListSprints: %v", err)
+	}
+	for _, call := range *seen {
+		if strings.Contains(call, "/board/") {
+			t.Errorf("consulted a board: %s", call)
+		}
+	}
+}
+
+func TestListSprintsCachesTheScan(t *testing.T) {
+	tracker, seen := newFakeJira(t, map[string]string{
+		"/rest/api/3/field":      fieldsFixture,
+		"/rest/api/3/search/jql": sprintScanFixture,
+	})
+
+	for i := 0; i < 3; i++ {
+		if _, err := tracker.ListSprints(context.Background(), domain.TrackerRef{ProjectKey: "PROJ"}); err != nil {
+			t.Fatalf("ListSprints: %v", err)
+		}
+	}
+
+	var searches int
+	for _, call := range *seen {
+		if strings.Contains(call, "/search/jql") {
+			searches++
+		}
+	}
+	if searches != 1 {
+		t.Errorf("scanned the project %d times, want 1", searches)
+	}
+}
+
 const sprintIssuesFixture = `{
-  "startAt": 0, "maxResults": 100, "total": 3,
   "issues": [
     {"key": "PROJ-1", "fields": {
       "summary": "Committed story", "duedate": "2026-08-26",
@@ -100,10 +157,10 @@ const sprintIssuesFixture = `{
 
 func TestSprintParentsExcludesSubTasksAndParsesDueDates(t *testing.T) {
 	tracker, _ := newFakeJira(t, map[string]string{
-		"/rest/agile/1.0/sprint/7355/issue": sprintIssuesFixture,
+		"/rest/api/3/search/jql": sprintIssuesFixture,
 	})
 
-	parents, err := tracker.SprintParents(context.Background(), domain.TrackerRef{}, "7355")
+	parents, err := tracker.SprintParents(context.Background(), domain.TrackerRef{ProjectKey: "PROJ"}, "7355")
 	if err != nil {
 		t.Fatalf("SprintParents: %v", err)
 	}
@@ -265,5 +322,77 @@ func TestSubTasksOfSendsAParentInQuery(t *testing.T) {
 	jql, _ := received["jql"].(string)
 	if jql != `parent IN ("PROJ-1","PROJ-2") ORDER BY key ASC` {
 		t.Errorf("jql = %q", jql)
+	}
+}
+
+func TestSprintParentsScopesToTheProject(t *testing.T) {
+	// A sprint on a shared board holds other teams' issues too. The query must
+	// say so, or a retrospective silently mixes them in.
+	var received map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&received)
+		io.WriteString(w, `{"issues":[]}`)
+	}))
+	defer server.Close()
+
+	tracker := NewTracker(Config{BaseURL: server.URL}, httpclient.New(server.Client()))
+	if _, err := tracker.SprintParents(context.Background(), domain.TrackerRef{ProjectKey: "PROJ"}, "7355"); err != nil {
+		t.Fatalf("SprintParents: %v", err)
+	}
+
+	jql, _ := received["jql"].(string)
+	if !strings.Contains(jql, `project = "PROJ"`) {
+		t.Errorf("jql is not scoped to the project: %q", jql)
+	}
+	if !strings.Contains(jql, "sprint = 7355") {
+		t.Errorf("jql does not name the sprint: %q", jql)
+	}
+}
+
+func TestChangelogPagingAdvancesByWhatTheServerReturned(t *testing.T) {
+	// Jira caps maxResults per endpoint, so a request for 100 may yield 50.
+	// Advancing by the requested size would step straight over the entries it
+	// declined to send — which is how recent sprints went missing from the
+	// sprint list before this was fixed.
+	const serverCap = 2
+	var offsets []int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/api/3/status" {
+			io.WriteString(w, statusesFixture)
+			return
+		}
+		startAt, _ := strconv.Atoi(r.URL.Query().Get("startAt"))
+		offsets = append(offsets, startAt)
+
+		// Six entries in total, handed out two at a time.
+		var entries []string
+		for i := startAt; i < startAt+serverCap && i < 6; i++ {
+			entries = append(entries, fmt.Sprintf(
+				`{"created":"2026-08-0%dT09:00:00.000-0400","items":[{"field":"status","from":"10039","fromString":"To Do","to":"3","toString":"In Progress"}]}`,
+				i+1))
+		}
+		isLast := startAt+serverCap >= 6
+		fmt.Fprintf(w, `{"isLast":%t,"values":[%s]}`, isLast, strings.Join(entries, ","))
+	}))
+	defer server.Close()
+
+	tracker := NewTracker(Config{BaseURL: server.URL}, httpclient.New(server.Client()))
+	history, err := tracker.StatusHistory(context.Background(), []domain.IssueKey{"PROJ-1"})
+	if err != nil {
+		t.Fatalf("StatusHistory: %v", err)
+	}
+
+	if got := len(history["PROJ-1"]); got != 6 {
+		t.Errorf("got %d changes, want all 6 — paging skipped entries", got)
+	}
+	want := []int{0, 2, 4}
+	if len(offsets) != len(want) {
+		t.Fatalf("requested offsets %v, want %v", offsets, want)
+	}
+	for i := range want {
+		if offsets[i] != want[i] {
+			t.Fatalf("requested offsets %v, want %v", offsets, want)
+		}
 	}
 }
