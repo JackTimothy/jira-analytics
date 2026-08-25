@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -88,7 +89,7 @@ func (c *CodeHost) LinkedEvents(
 	var mu sync.Mutex
 
 	for _, repo := range repos {
-		branches, err := c.matchingBranches(ctx, repo, matcher)
+		branches, err := c.matchingBranches(ctx, repo, keys, matcher)
 		if err != nil {
 			return nil, err
 		}
@@ -116,35 +117,104 @@ type branchMatch struct {
 	key  domain.IssueKey
 }
 
-// matchingBranches lists a repository's branches and keeps those naming an
-// issue we care about. Listing every branch is cheaper than it looks — it is a
-// handful of paginated calls — and it is the only way to see a branch that has
-// no pull request yet, which is precisely the In Progress state.
-func (c *CodeHost) matchingBranches(ctx context.Context, repo domain.RepoRef, matcher keyMatcher) ([]branchMatch, error) {
+// matchingBranches finds the branches naming an issue we care about.
+//
+// It leans on the convention that a branch name begins with its issue key,
+// which is what a tracker's "create branch" button produces. Every sub-task in
+// a sprint shares the same project key, so a single prefix query per project
+// asks the server for exactly the candidate branches — no full repository scan,
+// and none of the dependabot, release or long-lived branches that a monorepo
+// accumulates. The cost then scales with the sprint, not with the repository.
+//
+// Two properties of the server-side match need handling, both verified against
+// the live API rather than assumed:
+//
+//   - It is case sensitive, so the lowercase form is queried too when it
+//     differs. A branch typed by hand rather than generated is still found.
+//   - It matches raw characters, not whole tokens, so the prefix "PROJ-1" also
+//     returns "PROJ-10-…" and "PROJ-123-…". Every candidate is therefore run
+//     back through the key matcher, which parses whole keys and rejects those.
+func (c *CodeHost) matchingBranches(ctx context.Context, repo domain.RepoRef, keys []domain.IssueKey, matcher keyMatcher) ([]branchMatch, error) {
+	seen := map[string]struct{}{}
 	var matches []branchMatch
 
-	for page := 1; ; page++ {
-		query := url.Values{
-			"per_page": {"100"},
-			"page":     {strconv.Itoa(page)},
+	for _, prefix := range queryPrefixes(keys) {
+		refs, err := c.refsWithPrefix(ctx, repo, prefix)
+		if err != nil {
+			return nil, err
 		}
-		var branches []branchJSON
-		path := "/repos/" + url.PathEscape(repo.Owner) + "/" + url.PathEscape(repo.Name) + "/branches"
-		if err := c.client.DoJSON(ctx, c.request(path, query), &branches); err != nil {
-			return nil, fmt.Errorf("listing branches for %s: %w", repo, err)
-		}
-
-		for _, branch := range branches {
-			if key, ok := matcher.match(branch.Name); ok {
-				matches = append(matches, branchMatch{name: branch.Name, key: key})
+		for _, ref := range refs {
+			name := strings.TrimPrefix(ref.Ref, "refs/heads/")
+			if _, already := seen[name]; already {
+				continue
 			}
+			key, ok := matcher.match(name)
+			if !ok {
+				continue
+			}
+			seen[name] = struct{}{}
+			matches = append(matches, branchMatch{name: name, key: key})
+		}
+	}
+
+	sort.Slice(matches, func(i, j int) bool { return matches[i].name < matches[j].name })
+	return matches, nil
+}
+
+func (c *CodeHost) refsWithPrefix(ctx context.Context, repo domain.RepoRef, prefix string) ([]refJSON, error) {
+	var all []refJSON
+	seen := map[string]struct{}{}
+
+	for page := 1; ; page++ {
+		query := url.Values{"per_page": {"100"}, "page": {strconv.Itoa(page)}}
+		var refs []refJSON
+		path := "/repos/" + url.PathEscape(repo.Owner) + "/" + url.PathEscape(repo.Name) +
+			"/git/matching-refs/heads/" + prefix
+		if err := c.client.DoJSON(ctx, c.request(path, query), &refs); err != nil {
+			return nil, fmt.Errorf("listing branches matching %q in %s: %w", prefix, repo, err)
 		}
 
-		if len(branches) < 100 {
+		fresh := 0
+		for _, ref := range refs {
+			if _, already := seen[ref.Ref]; already {
+				continue
+			}
+			seen[ref.Ref] = struct{}{}
+			all = append(all, ref)
+			fresh++
+		}
+
+		// Stop on a short page, and also when a page adds nothing new — which
+		// is what happens if the endpoint ignores the page parameter and keeps
+		// returning the same set.
+		if len(refs) < 100 || fresh == 0 {
 			break
 		}
 	}
-	return matches, nil
+	return all, nil
+}
+
+// queryPrefixes reduces the issue keys to the shortest set of prefixes that
+// covers them: normally one per project. The lowercase form is included when it
+// differs, since the server-side match is case sensitive.
+func queryPrefixes(keys []domain.IssueKey) []string {
+	prefixes := map[string]struct{}{}
+	for _, key := range keys {
+		hyphen := strings.LastIndex(string(key), "-")
+		if hyphen <= 0 {
+			continue
+		}
+		prefix := string(key)[:hyphen+1]
+		prefixes[prefix] = struct{}{}
+		prefixes[strings.ToLower(prefix)] = struct{}{}
+	}
+
+	out := make([]string, 0, len(prefixes))
+	for prefix := range prefixes {
+		out = append(out, prefix)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (c *CodeHost) eventsForBranch(

@@ -78,8 +78,12 @@ var jiraRoutes = map[string]string{
 }
 
 var githubRoutes = map[string]string{
-	"/repos/acme/service":          `{"default_branch":"dev"}`,
-	"/repos/acme/service/branches": `[{"name":"dev"},{"name":"PROJ-10-api"},{"name":"PROJ-11-ui"}]`,
+	"/repos/acme/service": `{"default_branch":"dev"}`,
+
+	"/repos/acme/service/git/matching-refs/heads/PROJ-": `[
+		{"ref":"refs/heads/PROJ-10-api"},
+		{"ref":"refs/heads/PROJ-11-ui"}]`,
+	"/repos/acme/service/git/matching-refs/heads/proj-": `[]`,
 
 	"/repos/acme/service/compare/dev...PROJ-10-api": `{"commits":[{"commit":{"committer":{"date":"2026-08-04T13:00:00Z"}}}]}`,
 	"/repos/acme/service/compare/dev...PROJ-11-ui":  `{"commits":[{"commit":{"committer":{"date":"2026-08-05T13:00:00Z"}}}]}`,

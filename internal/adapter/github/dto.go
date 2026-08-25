@@ -8,8 +8,10 @@ type repoJSON struct {
 	DefaultBranch string `json:"default_branch"`
 }
 
-type branchJSON struct {
-	Name string `json:"name"`
+// refJSON is one entry from the matching-refs listing. The ref is fully
+// qualified, for instance "refs/heads/PROJ-10-add-a-thing".
+type refJSON struct {
+	Ref string `json:"ref"`
 }
 
 type compareJSON struct {

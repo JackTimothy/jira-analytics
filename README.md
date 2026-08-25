@@ -159,6 +159,27 @@ is the single worst pair under deuteranopia.
 A table view exists alongside the chart, and every state is labelled in the
 legend, so identity never rests on colour alone.
 
+### Finding the branches
+
+Branch discovery leans on the convention that a branch name **begins** with its
+issue key. Every sub-task in a sprint shares the same project key, so one
+prefix query per project asks the code host for exactly the candidate branches
+rather than listing the repository. On a long-lived monorepo that is the
+difference between a cost that scales with the sprint and one that scales with
+every branch anyone has ever left behind.
+
+Two properties of the server-side match are handled explicitly, both verified
+against the live API:
+
+- It is **case sensitive**, so the lowercase prefix is queried too.
+- It matches **raw characters, not whole tokens**, so a query for `PROJ-1` also
+  returns `PROJ-10-…` and `PROJ-123-…`. Every candidate is run back through the
+  key parser, which reads whole keys and rejects those.
+
+A branch that does not start with its issue key will not be found. That shows up
+as a `no linked branch or pull request found` warning on the retrospective rather
+than as a silently empty row.
+
 ### Known approximation
 
 Code hosts record no branch-creation timestamp, so the earliest commit unique to

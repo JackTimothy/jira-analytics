@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -17,8 +18,15 @@ var testRepo = domain.RepoRef{Owner: "org", Name: "repo"}
 
 // fixtures trimmed from real GitHub responses.
 var fixtures = map[string]string{
-	"/repos/org/repo":          `{"default_branch":"dev"}`,
-	"/repos/org/repo/branches": `[{"name":"dev"},{"name":"PROJ-10-add-picker"},{"name":"dependabot/npm/react-19"},{"name":"PROJ-11-api"}]`,
+	"/repos/org/repo": `{"default_branch":"dev"}`,
+
+	// matching-refs answers a raw-character prefix query, so PROJ-1 also
+	// returns PROJ-11 and PROJ-110. The adapter must reject those itself.
+	"/repos/org/repo/git/matching-refs/heads/PROJ-": `[
+		{"ref":"refs/heads/PROJ-10-add-picker"},
+		{"ref":"refs/heads/PROJ-11-api"},
+		{"ref":"refs/heads/PROJ-110-unrelated-work"}]`,
+	"/repos/org/repo/git/matching-refs/heads/proj-": `[]`,
 
 	"/repos/org/repo/compare/dev...PROJ-10-add-picker": `{"commits":[
 		{"commit":{"committer":{"date":"2026-08-04T13:00:00Z"}}},
@@ -261,3 +269,72 @@ var errBoom = errorString("boom")
 type errorString string
 
 func (e errorString) Error() string { return string(e) }
+
+func TestQueryPrefixesCollapsesKeysToProjectPrefixes(t *testing.T) {
+	got := queryPrefixes([]domain.IssueKey{"PROJ-10", "PROJ-11", "OTHER-3", "malformed"})
+	want := []string{"OTHER-", "PROJ-", "other-", "proj-"}
+
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestMatchingBranchesRejectsRawPrefixFalsePositives(t *testing.T) {
+	host, seen := newFakeGitHub(t)
+
+	// PROJ-110 shares a character prefix with PROJ-11 but is a different issue,
+	// and nobody asked about it.
+	result, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
+		domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10", "PROJ-11"})
+	if err != nil {
+		t.Fatalf("LinkedEvents: %v", err)
+	}
+
+	if _, ok := result["PROJ-110"]; ok {
+		t.Error("a raw-prefix false positive was linked")
+	}
+	if len(result) != 2 {
+		t.Errorf("got %d linked issues, want 2: %v", len(result), keysOf(result))
+	}
+	for _, path := range *seen {
+		if strings.Contains(path, "PROJ-110") {
+			t.Errorf("investigated a branch nobody asked about: %s", path)
+		}
+	}
+}
+
+func TestMatchingBranchesQueriesOncePerProjectPrefixNotOncePerIssue(t *testing.T) {
+	host, seen := newFakeGitHub(t)
+
+	if _, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
+		domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10", "PROJ-11"}); err != nil {
+		t.Fatalf("LinkedEvents: %v", err)
+	}
+
+	var refQueries int
+	for _, path := range *seen {
+		if strings.Contains(path, "/git/matching-refs/") {
+			refQueries++
+		}
+		if strings.HasSuffix(path, "/branches") {
+			t.Error("fell back to listing every branch in the repository")
+		}
+	}
+	// One for the project prefix, one for its lowercase form — not one per key.
+	if refQueries != 2 {
+		t.Errorf("made %d ref queries for 2 issues in 1 project, want 2", refQueries)
+	}
+}
+
+func keysOf(m map[domain.IssueKey][]domain.Event) []domain.IssueKey {
+	out := make([]domain.IssueKey, 0, len(m))
+	for key := range m {
+		out = append(out, key)
+	}
+	return out
+}
