@@ -1,0 +1,174 @@
+/*
+ * Design tokens.
+ *
+ * The seven timeline states are not seven independent identities. Five of them
+ * are an ordered progression - a funnel from not-started to merged - and are
+ * encoded as a single-hue ordinal ramp, validated for monotone lightness,
+ * visible step gaps and surface contrast in both modes. The other two are
+ * reserved status colours for the states that mean "stop and look": feedback
+ * outstanding, and blocked.
+ *
+ * Encoding the progression as one ramp rather than seven hues is what makes the
+ * chart colourblind-safe. Seven independent hues cannot clear the separation
+ * floors at once, and the obvious semantic choice - green for done, red for
+ * blocked - is the single worst pair under deuteranopia.
+ *
+ * In each mode the earliest stage sits nearest the surface, so unstarted work
+ * recedes and finished work stands out.
+ */
+:root {
+  color-scheme: light;
+
+  --surface: #fcfcfb;
+  --plane: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --gridline: #e1e0d9;
+  --border: #e1e0d9;
+
+  --state-to-do: #86b6ef;
+  --state-in-progress: #5598e7;
+  --state-review-requested: #2a78d6;
+  --state-approved: #1c5cab;
+  --state-done: #104281;
+
+  --state-feedback-given: #fab219;
+  --state-blocked: #d03b3b;
+
+  --focus: #2a78d6;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+    --surface: #1a1a19;
+    --plane: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --gridline: #2c2c2a;
+    --border: #2c2c2a;
+
+    --state-to-do: #256abf;
+    --state-in-progress: #3987e5;
+    --state-review-requested: #6da7ec;
+    --state-approved: #9ec5f4;
+    --state-done: #cde2fb;
+
+    --focus: #6da7ec;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --surface: #1a1a19;
+  --plane: #0d0d0d;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --gridline: #2c2c2a;
+  --border: #2c2c2a;
+
+  --state-to-do: #256abf;
+  --state-in-progress: #3987e5;
+  --state-review-requested: #6da7ec;
+  --state-approved: #9ec5f4;
+  --state-done: #cde2fb;
+
+  --focus: #6da7ec;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--plane);
+  color: var(--text-primary);
+  font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+h1, h2, h3 { line-height: 1.25; margin: 0; }
+
+button { font: inherit; color: inherit; cursor: pointer; }
+
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.app { max-width: 1180px; margin: 0 auto; padding: 24px 20px 64px; }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+
+.muted { color: var(--text-secondary); }
+.small { font-size: 13px; }
+
+.row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.stack { display: flex; flex-direction: column; gap: 16px; }
+
+.crumbs {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 13px; color: var(--text-secondary); margin-bottom: 16px;
+}
+
+.link-button {
+  background: none; border: none; padding: 0;
+  color: var(--focus); text-decoration: underline;
+}
+
+.list { list-style: none; margin: 0; padding: 0; }
+
+.list-item {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 16px; width: 100%; padding: 14px 16px;
+  background: none; border: none; border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+
+.list-item:last-child { border-bottom: none; }
+.list-item:hover { background: var(--plane); }
+
+.toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap; margin: 20px 0 12px;
+}
+
+.segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+
+.segmented button {
+  border: none; background: var(--surface);
+  padding: 7px 14px; font-size: 13px; color: var(--text-secondary);
+}
+
+.segmented button[aria-pressed="true"] { background: var(--focus); color: #ffffff; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; }
+
+.legend-item { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+
+.swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+
+.notice {
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--state-feedback-given);
+  border-radius: 8px; padding: 12px 14px; background: var(--surface);
+}
+
+.notice.error { border-left-color: var(--state-blocked); }
+
+.field { display: flex; flex-direction: column; gap: 6px; max-width: 320px; }
+
+.field select, .field input {
+  font: inherit; padding: 7px 9px; border-radius: 7px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-primary);
+}
+
+table.data { border-collapse: collapse; width: 100%; font-size: 13px; }
+
+table.data th, table.data td {
+  text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--gridline);
+}
+
+table.data th { color: var(--text-secondary); font-weight: 600; }
+
+.scroll-x { overflow-x: auto; }

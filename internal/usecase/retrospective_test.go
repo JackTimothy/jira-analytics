@@ -262,3 +262,49 @@ func TestBuildKeepsParentsWithNoSubTasks(t *testing.T) {
 		t.Error("expected no sub-task rows")
 	}
 }
+
+func TestBuildIgnoresSubTasksWhoseParentIsNotInTheSelectedScope(t *testing.T) {
+	projects, tracker, code := buildFixture()
+	// A tracker that returns more than it was asked for must not produce rows
+	// with nowhere to go, nor warnings about work the reader cannot see.
+	tracker.subTasks = append(tracker.subTasks, domain.SubTask{
+		Key: "PROJ-90", ParentKey: "PROJ-UNRELATED", Summary: "Someone else's work",
+		Created: ts(4, 9), Status: statusToDo,
+	})
+
+	result, err := NewRetrospective(projects, tracker, code).
+		Build(context.Background(), RetrospectiveRequest{ProjectID: "activation", SprintID: "100", Scope: domain.ScopeAll})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	for _, group := range result.Groups {
+		for _, timeline := range group.SubTasks {
+			if timeline.SubTask.Key == "PROJ-90" {
+				t.Fatal("a sub-task from an unselected parent was charted")
+			}
+		}
+	}
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning, "PROJ-90") {
+			t.Errorf("warned about a sub-task the reader cannot see: %q", warning)
+		}
+	}
+}
+
+func TestBuildCommittedScopeDropsWarningsForFilteredOutWork(t *testing.T) {
+	projects, tracker, code := buildFixture()
+	result, err := NewRetrospective(projects, tracker, code).
+		Build(context.Background(), RetrospectiveRequest{ProjectID: "activation", SprintID: "100", Scope: domain.ScopeCommitted})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	// PROJ-20 belongs to the uncommitted parent, so neither its row nor its
+	// warning belongs in the committed view.
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning, "PROJ-20") {
+			t.Errorf("committed scope warned about out-of-scope work: %q", warning)
+		}
+	}
+}

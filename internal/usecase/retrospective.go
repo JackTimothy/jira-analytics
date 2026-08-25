@@ -103,7 +103,19 @@ func (r *Retrospective) assemble(
 	byParent := map[domain.IssueKey][]domain.SubTaskTimeline{}
 	var warnings []string
 
+	// A sub-task whose parent is not in the selected set has nowhere to be
+	// charted. Skipping it here rather than letting it fall through keeps the
+	// warnings describing only what the reader can actually see, and makes the
+	// result independent of a tracker returning more than it was asked for.
+	selected := make(map[domain.IssueKey]struct{}, len(parents))
+	for _, parent := range parents {
+		selected[parent.Key] = struct{}{}
+	}
+
 	for _, subTask := range subTasks {
+		if _, ok := selected[subTask.ParentKey]; !ok {
+			continue
+		}
 		changes := history[subTask.Key]
 		events := append(statusEvents(changes), codeEvents[subTask.Key]...)
 
