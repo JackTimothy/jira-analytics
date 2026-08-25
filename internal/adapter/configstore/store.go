@@ -91,7 +91,7 @@ func (s *Store) Get(_ context.Context, id domain.ProjectID) (domain.Project, err
 // leave an operator with a truncated project file and no way to start.
 func (s *Store) UpdateSettings(_ context.Context, id domain.ProjectID, settings domain.ProjectSettings) error {
 	if _, err := settings.Location(); err != nil {
-		return fmt.Errorf("invalid settings: %w", err)
+		return err
 	}
 
 	s.mu.Lock()
