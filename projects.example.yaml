@@ -1,0 +1,44 @@
+# Example project configuration.
+#
+# Copy to projects.yaml and fill in real values. projects.yaml is gitignored:
+# deployment-specific details — your Atlassian site, project keys, repository
+# names, reviewer logins — must never be committed.
+#
+# Credentials do not live here. They come from the environment:
+#   JIRA_BASE_URL   https://your-site.atlassian.net
+#   JIRA_EMAIL      the account the API token belongs to
+#   JIRA_API_TOKEN  https://id.atlassian.com/manage-profile/security/api-tokens
+#   GITHUB_TOKEN    a token with read access to the repositories below
+#   PROJECTS_FILE   path to your projects.yaml (defaults to ./projects.yaml)
+#   PORT            HTTP port (defaults to 8080)
+
+projects:
+  - id: my-team
+    name: My Team
+    settings:
+      # Sprint ends are instants; due dates are calendar days. This timezone
+      # decides which day a sprint end falls on, and so which work counts as
+      # committed. Editable at runtime via
+      # PATCH /api/v1/projects/{id}/settings.
+      timezone: America/New_York
+
+    tracker:
+      type: jira
+      projectKey: PROJ
+      # The Jira board whose sprints you want. Find it in the board URL:
+      # .../jira/software/c/projects/PROJ/boards/45 -> "45"
+      boardId: "45"
+
+    # One or more repositories. Branches are linked to sub-tasks by the issue
+    # key appearing in the branch name, which is what Jira's "Create branch"
+    # button produces by default.
+    repos:
+      - { host: github, owner: your-org, name: your-repo }
+
+    reviewers:
+      # Review states are about humans. Bots are excluded so an automated
+      # approval never stands in for a person's.
+      excludeBots: true
+      # Additional logins to ignore — AI reviewers that appear as normal users
+      # rather than as GitHub Apps.
+      excludeLogins: []

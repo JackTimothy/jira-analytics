@@ -26,8 +26,11 @@ type SubTask struct {
 	Status    IssueStatus
 }
 
-// StatusChange is one transition from a tracker's change history.
+// StatusChange is one transition from a tracker's change history. Both sides
+// are recorded because the earliest entry's From is the only evidence of what a
+// sub-task's status was before anyone changed it.
 type StatusChange struct {
-	At time.Time
-	To IssueStatus
+	At   time.Time
+	From IssueStatus
+	To   IssueStatus
 }

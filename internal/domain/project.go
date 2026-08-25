@@ -25,7 +25,7 @@ func (s ProjectSettings) Location() (*time.Location, error) {
 	}
 	loc, err := time.LoadLocation(name)
 	if err != nil {
-		return nil, fmt.Errorf("unknown timezone %q: %w", name, err)
+		return nil, fmt.Errorf("%w: unknown timezone %q", ErrInvalidSettings, name)
 	}
 	return loc, nil
 }
