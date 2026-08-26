@@ -205,9 +205,50 @@ correct by construction and needs no board configured.
 The scan costs one request per hundred issues and is cached for a few minutes,
 since the set of sprints changes at most once a sprint.
 
+Opening a retrospective does not pay for it. Naming one sprint's dates is a
+different question from enumerating a project's sprints, and it is answered
+directly by id in a single request. Fetching a sprint *by id* carries none of
+the ambiguity above — there is no "whose sprint is this" to get wrong when the
+id is already in hand.
+
 Every issue query is scoped to the project for the same reason — a sprint on a
 shared board holds other teams' issues, and a retrospective that mixed them in
 would be worse than useless.
+
+### Speed, and what it depends on
+
+Assembling a retrospective is almost entirely round trips; the replay itself is
+microseconds. So the adapters overlap everything that can overlap — the tracker
+and the code host, the repositories, the pages of a listing, the three reads of
+each pull request — under a concurrency bound, because both hosts punish bursts
+with backoff that costs more than the parallelism saves.
+
+Two things depend on what a particular deployment supports, and each has a
+working but expensive fallback:
+
+| Fast path | Fallback | What the fallback costs |
+| --- | --- | --- |
+| Sprint fetched by id from the Agile API | Scan the project's issues | One request per hundred issues, per retrospective |
+| Changelogs attached to the issue search | One request per sub-task | Fifty to seventy requests, per retrospective |
+
+Both fallbacks are announced in the log the first time they are taken. A silent
+fallback is the worse failure: every build would quietly pay for it and nothing
+would say why.
+
+`cmd/probe` answers both questions against a real site before you wonder:
+
+```sh
+go run ./cmd/probe -sprint 7354
+```
+
+Each build also logs what it cost, which is the number to compare against:
+
+```
+retrospective built project=otco sprint=7354 sprint=0.3s parents=0.4s
+  subtasks=0.5s history=1.1s code=2.9s total=3.4s requests=41
+```
+
+Phases overlap, so they will not sum to the total — that is the overlap working.
 
 ### Finding the code
 
@@ -245,9 +286,13 @@ it is confined to the code-host adapter.
 ## Tests
 
 ```sh
-go test ./...
+go test -race ./...
 (cd web && npm run build)   # tsc runs as part of the build
 ```
+
+`-race` is not optional here. Both adapters fan out, and the concurrency
+assertions were each checked against a deliberately serialised build to confirm
+they fail there — a test that passes either way is worse than no test.
 
 `internal/integration` wires the real adapters, interactors and handlers against
 fake tracker and code-host servers. The unit tests prove each layer in

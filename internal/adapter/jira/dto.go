@@ -83,6 +83,27 @@ type changelogPage struct {
 	Values []changelogJSON `json:"values"`
 }
 
+// inlineChangelogJSON is the changelog as it arrives attached to a search
+// result, rather than from the per-issue endpoint. Jira names the entries
+// "histories" here and "values" there, for the same data.
+//
+// It is a pointer wherever it appears, because the difference between "this
+// issue has no history" and "this site did not honour the expand at all" is the
+// difference between a correct chart and a silently empty one.
+type inlineChangelogJSON struct {
+	StartAt    int             `json:"startAt"`
+	MaxResults int             `json:"maxResults"`
+	Total      int             `json:"total"`
+	Histories  []changelogJSON `json:"histories"`
+}
+
+// truncated reports whether Jira sent only part of this issue's history. The
+// search endpoint caps what it will inline, and an issue with a long history is
+// exactly the one whose timeline matters most.
+func (c inlineChangelogJSON) truncated() bool {
+	return c.Total > len(c.Histories)
+}
+
 type changelogJSON struct {
 	Created string              `json:"created"`
 	Items   []changelogItemJSON `json:"items"`

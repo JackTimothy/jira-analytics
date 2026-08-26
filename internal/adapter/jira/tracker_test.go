@@ -404,6 +404,13 @@ func TestChangelogPagingAdvancesByWhatTheServerReturned(t *testing.T) {
 			io.WriteString(w, statusesFixture)
 			return
 		}
+		if !strings.HasSuffix(r.URL.Path, "/changelog") {
+			// This site does not attach changelogs to a search, which is what
+			// puts the per-issue endpoint below in play at all.
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"errorMessages":["Unrecognized field: expand"]}`)
+			return
+		}
 		startAt, _ := strconv.Atoi(r.URL.Query().Get("startAt"))
 		offsets = append(offsets, startAt)
 
@@ -645,5 +652,209 @@ func TestSprintSaysNothingOnTheFastPath(t *testing.T) {
 	}
 	if log.Len() != 0 {
 		t.Errorf("warned on the fast path: %s", log.String())
+	}
+}
+
+// The point of the fast path: a sprint's worth of status history in one search
+// rather than one request per sub-task.
+func TestStatusHistoryReadsChangelogsFromTheSearchWhenTheSiteAttachesThem(t *testing.T) {
+	var searches, changelogs atomic.Int32
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/rest/api/3/status":
+			io.WriteString(w, statusesFixture)
+		case strings.HasSuffix(r.URL.Path, "/changelog"):
+			changelogs.Add(1)
+			io.WriteString(w, `{"isLast":true,"values":[]}`)
+		default:
+			searches.Add(1)
+			io.WriteString(w, `{"issues":[
+				{"key":"PROJ-1","changelog":{"startAt":0,"maxResults":100,"total":1,"histories":[
+					{"created":"2026-08-04T09:00:00.000-0400","items":[
+						{"field":"status","from":"10039","fromString":"To Do","to":"3","toString":"In Progress"}]}]}},
+				{"key":"PROJ-2","changelog":{"startAt":0,"maxResults":100,"total":0,"histories":[]}}]}`)
+		}
+	}))
+	defer server.Close()
+
+	tracker := NewTracker(Config{BaseURL: server.URL}, httpclient.New(server.Client()))
+	history, err := tracker.StatusHistory(context.Background(), []domain.IssueKey{"PROJ-1", "PROJ-2"})
+	if err != nil {
+		t.Fatalf("StatusHistory: %v", err)
+	}
+
+	if len(history["PROJ-1"]) != 1 {
+		t.Errorf("PROJ-1 has %d changes, want 1", len(history["PROJ-1"]))
+	}
+	if history["PROJ-1"][0].To.Name != "In Progress" {
+		t.Errorf("PROJ-1 transitioned to %q", history["PROJ-1"][0].To.Name)
+	}
+	if _, present := history["PROJ-2"]; present {
+		t.Error("PROJ-2 has no transitions and should be absent, not present-and-empty")
+	}
+	if searches.Load() != 1 {
+		t.Errorf("made %d searches, want 1", searches.Load())
+	}
+	if changelogs.Load() != 0 {
+		t.Errorf("made %d per-issue changelog requests, want none", changelogs.Load())
+	}
+}
+
+// Jira caps what it will inline. An issue with a long history is exactly the
+// one whose timeline matters most, so a truncated changelog must be refetched
+// rather than charted as if that were all that happened.
+func TestStatusHistoryRefetchesOnlyTheIssuesWhoseChangelogWasTruncated(t *testing.T) {
+	var refetched sync.Map
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/rest/api/3/status":
+			io.WriteString(w, statusesFixture)
+		case strings.HasSuffix(r.URL.Path, "/changelog"):
+			key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/rest/api/3/issue/"), "/changelog")
+			refetched.Store(key, true)
+			io.WriteString(w, `{"isLast":true,"values":[
+				{"created":"2026-08-01T09:00:00.000-0400","items":[
+					{"field":"status","from":"10039","fromString":"To Do","to":"3","toString":"In Progress"}]},
+				{"created":"2026-08-02T09:00:00.000-0400","items":[
+					{"field":"status","from":"3","fromString":"In Progress","to":"10024","toString":"Done"}]}]}`)
+		default:
+			// PROJ-1 says it has three entries but only one was inlined.
+			io.WriteString(w, `{"issues":[
+				{"key":"PROJ-1","changelog":{"startAt":0,"maxResults":1,"total":3,"histories":[
+					{"created":"2026-08-04T09:00:00.000-0400","items":[
+						{"field":"status","from":"10039","fromString":"To Do","to":"3","toString":"In Progress"}]}]}},
+				{"key":"PROJ-2","changelog":{"startAt":0,"maxResults":100,"total":1,"histories":[
+					{"created":"2026-08-05T09:00:00.000-0400","items":[
+						{"field":"status","from":"10039","fromString":"To Do","to":"3","toString":"In Progress"}]}]}}]}`)
+		}
+	}))
+	defer server.Close()
+
+	tracker := NewTracker(Config{BaseURL: server.URL}, httpclient.New(server.Client()))
+	history, err := tracker.StatusHistory(context.Background(), []domain.IssueKey{"PROJ-1", "PROJ-2"})
+	if err != nil {
+		t.Fatalf("StatusHistory: %v", err)
+	}
+
+	if _, ok := refetched.Load("PROJ-1"); !ok {
+		t.Error("PROJ-1's truncated changelog was charted as complete")
+	}
+	if _, ok := refetched.Load("PROJ-2"); ok {
+		t.Error("PROJ-2's complete changelog was refetched for nothing")
+	}
+	if len(history["PROJ-1"]) != 2 {
+		t.Errorf("PROJ-1 has %d changes, want the 2 from the refetch", len(history["PROJ-1"]))
+	}
+	if len(history["PROJ-2"]) != 1 {
+		t.Errorf("PROJ-2 has %d changes, want 1", len(history["PROJ-2"]))
+	}
+}
+
+// A site that accepts the expand and quietly ignores it returns issues with no
+// changelog attached. Believing that would chart a whole sprint as if nothing
+// had ever happened — far worse than making the extra requests.
+func TestStatusHistoryFallsBackWhenTheSiteIgnoresTheExpand(t *testing.T) {
+	var changelogs atomic.Int32
+	var log bytes.Buffer
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/rest/api/3/status":
+			io.WriteString(w, statusesFixture)
+		case strings.HasSuffix(r.URL.Path, "/changelog"):
+			changelogs.Add(1)
+			io.WriteString(w, `{"isLast":true,"values":[
+				{"created":"2026-08-04T09:00:00.000-0400","items":[
+					{"field":"status","from":"10039","fromString":"To Do","to":"3","toString":"In Progress"}]}]}`)
+		default:
+			// Accepted, and silently ignored: no changelog key at all.
+			io.WriteString(w, `{"issues":[{"key":"PROJ-1"},{"key":"PROJ-2"}]}`)
+		}
+	}))
+	defer server.Close()
+
+	tracker := NewTracker(Config{BaseURL: server.URL}, httpclient.New(server.Client()),
+		WithLogger(slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelWarn}))))
+
+	history, err := tracker.StatusHistory(context.Background(), []domain.IssueKey{"PROJ-1", "PROJ-2"})
+	if err != nil {
+		t.Fatalf("StatusHistory: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("got %d histories, want 2 — the silent gap was believed", len(history))
+	}
+	if changelogs.Load() != 2 {
+		t.Errorf("made %d per-issue requests, want 2", changelogs.Load())
+	}
+	if !strings.Contains(log.String(), "will not attach changelogs") {
+		t.Error("degraded silently; nothing would explain why every build is slow")
+	}
+
+	// And it does not keep paying for the search on every later call.
+	before := changelogs.Load()
+	if _, err := tracker.StatusHistory(context.Background(), []domain.IssueKey{"PROJ-1"}); err != nil {
+		t.Fatalf("StatusHistory: %v", err)
+	}
+	if changelogs.Load() != before+1 {
+		t.Errorf("second call made %d requests, want 1", changelogs.Load()-before)
+	}
+	if strings.Count(log.String(), "will not attach changelogs") != 1 {
+		t.Error("warned more than once about a fact it already knew")
+	}
+}
+
+// An empty search result is no evidence either way: the site may inline
+// changelogs perfectly well and simply have matched nothing. Concluding it does
+// not, permanently, on that basis would be wrong.
+func TestStatusHistoryDoesNotCondemnTheSiteOnAnEmptySearch(t *testing.T) {
+	var log bytes.Buffer
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/rest/api/3/status":
+			io.WriteString(w, statusesFixture)
+		case strings.HasSuffix(r.URL.Path, "/changelog"):
+			io.WriteString(w, `{"isLast":true,"values":[]}`)
+		default:
+			io.WriteString(w, `{"issues":[]}`)
+		}
+	}))
+	defer server.Close()
+
+	tracker := NewTracker(Config{BaseURL: server.URL}, httpclient.New(server.Client()),
+		WithLogger(slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelWarn}))))
+
+	if _, err := tracker.StatusHistory(context.Background(), []domain.IssueKey{"PROJ-1"}); err != nil {
+		t.Fatalf("StatusHistory: %v", err)
+	}
+	if tracker.expandKnownRefused() {
+		t.Error("gave up on the fast path with no evidence against it")
+	}
+	if log.Len() != 0 {
+		t.Errorf("warned about nothing: %s", log.String())
+	}
+}
+
+// A timeout or a 500 is this request's problem. Disabling the fast path for the
+// life of the process over one is a permanent penalty for a transient fault.
+func TestStatusHistorySurfacesATransientSearchFailureWithoutCondemningTheSite(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/api/3/status" {
+			io.WriteString(w, statusesFixture)
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	tracker := NewTracker(Config{BaseURL: server.URL},
+		httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })))
+
+	if _, err := tracker.StatusHistory(context.Background(), []domain.IssueKey{"PROJ-1"}); err == nil {
+		t.Fatal("expected the failure to surface rather than be swallowed")
+	}
+	if tracker.expandKnownRefused() {
+		t.Error("a transient failure permanently disabled the fast path")
 	}
 }

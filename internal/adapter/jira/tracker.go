@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -51,6 +52,13 @@ type Tracker struct {
 	sprints   map[string]sprintCacheEntry
 
 	logger *slog.Logger
+
+	// expandMu guards what this site was observed to do with an expand of the
+	// changelog on a search. It is a runtime observation rather than
+	// configuration because Jira Cloud, Jira Data Center and a site behind a
+	// proxy all behave differently, and none of them says so up front.
+	expandMu      sync.Mutex
+	expandRefused bool
 
 	// agileWarned keeps the fallback warning to once per process. It is worth
 	// saying loudly and worth saying only once.
@@ -161,7 +169,7 @@ func (t *Tracker) ListSprints(ctx context.Context, tracker domain.TrackerRef) ([
 	jql := fmt.Sprintf("project = %q AND sprint IS NOT EMPTY ORDER BY created ASC", tracker.ProjectKey)
 	byID := map[int]domain.Sprint{}
 
-	err = t.eachSearchPage(ctx, jql, []string{field}, func(issues []issueJSON, raw []json.RawMessage) error {
+	err = t.eachSearchPage(ctx, jql, []string{field}, "", func(issues []issueJSON, raw []json.RawMessage) error {
 		for _, entry := range raw {
 			for _, sprint := range sprintsInIssue(entry, field) {
 				converted, err := sprint.toDomain()
@@ -336,7 +344,7 @@ func (t *Tracker) SprintParents(ctx context.Context, tracker domain.TrackerRef, 
 	jql := fmt.Sprintf("sprint = %s AND project = %q ORDER BY key ASC", string(sprint), tracker.ProjectKey)
 
 	var parents []domain.WorkItem
-	err := t.eachSearchPage(ctx, jql, []string{"summary", "duedate", "created", "status", "issuetype"},
+	err := t.eachSearchPage(ctx, jql, []string{"summary", "duedate", "created", "status", "issuetype"}, "",
 		func(issues []issueJSON, _ []json.RawMessage) error {
 			for _, issue := range issues {
 				if issue.Fields.IssueType.Subtask {
@@ -362,7 +370,7 @@ func (t *Tracker) SprintParents(ctx context.Context, tracker domain.TrackerRef, 
 //
 // Paging is by the token the server returns, so there is no page arithmetic to
 // get wrong.
-func (t *Tracker) eachSearchPage(ctx context.Context, jql string, fields []string, fn func([]issueJSON, []json.RawMessage) error) error {
+func (t *Tracker) eachSearchPage(ctx context.Context, jql string, fields []string, expand string, fn func([]issueJSON, []json.RawMessage) error) error {
 	var pageToken string
 
 	for {
@@ -370,6 +378,9 @@ func (t *Tracker) eachSearchPage(ctx context.Context, jql string, fields []strin
 			"jql":        jql,
 			"maxResults": pageSize,
 			"fields":     fields,
+		}
+		if expand != "" {
+			body["expand"] = expand
 		}
 		if pageToken != "" {
 			body["nextPageToken"] = pageToken
@@ -439,7 +450,7 @@ func (t *Tracker) SubTasksOf(ctx context.Context, parents []domain.IssueKey) ([]
 	jql := "parent IN (" + strings.Join(keys, ",") + ") ORDER BY key ASC"
 
 	var subTasks []domain.SubTask
-	err := t.eachSearchPage(ctx, jql, []string{"summary", "created", "status", "issuetype", "parent"},
+	err := t.eachSearchPage(ctx, jql, []string{"summary", "created", "status", "issuetype", "parent"}, "",
 		func(issues []issueJSON, _ []json.RawMessage) error {
 			for _, issue := range issues {
 				subTask, err := issue.toSubTask()
@@ -490,6 +501,144 @@ func (t *Tracker) StatusHistory(ctx context.Context, keys []domain.IssueKey) (ma
 		return nil, err
 	}
 
+	if !t.expandKnownRefused() {
+		history, truncated, honoured, err := t.inlineHistory(ctx, keys, statuses)
+		switch {
+		case err != nil:
+			return nil, err
+		case honoured:
+			// Only the issues whose history Jira declined to inline in full
+			// need a request of their own, which is normally none of them.
+			if len(truncated) > 0 {
+				rest, err := t.changelogsFor(ctx, truncated, statuses)
+				if err != nil {
+					return nil, err
+				}
+				for key, changes := range rest {
+					history[key] = changes
+				}
+			}
+			return history, nil
+		}
+	}
+
+	return t.changelogsFor(ctx, keys, statuses)
+}
+
+// searchChunk is how many issue keys go into one JQL "key IN (...)" clause.
+// Jira pages at a hundred anyway, so a larger chunk would only make the query
+// string longer for no benefit.
+const searchChunk = 100
+
+// inlineHistory tries to read every issue's changelog from the search response
+// rather than from one request per issue.
+//
+// It reports whether the site honoured the request. A site that quietly ignores
+// the expand returns issues with no changelog attached at all, which is
+// indistinguishable from "nothing ever happened" unless the absence of the
+// field is checked for specifically — and charting a sprint's worth of work as
+// if nothing had happened is a far worse failure than making a few extra
+// requests.
+func (t *Tracker) inlineHistory(
+	ctx context.Context,
+	keys []domain.IssueKey,
+	statuses map[string]domain.IssueStatus,
+) (history map[domain.IssueKey][]domain.StatusChange, truncated []domain.IssueKey, honoured bool, err error) {
+	chunks := chunkKeys(keys, searchChunk)
+
+	// Three outcomes, not two. "Every issue came back with a changelog
+	// attached" and "no issue came back at all" are both free of missing
+	// changelogs, but only the first is evidence that the site honours the
+	// expand — and concluding it does on no evidence would chart a sprint's
+	// work as if nothing had ever happened to it.
+	type result struct {
+		history   map[domain.IssueKey][]domain.StatusChange
+		truncated []domain.IssueKey
+		sawIssue  bool
+		sawGap    bool
+	}
+
+	results, err := parallel.Map(ctx, chunks, maxConcurrency, func(ctx context.Context, chunk []domain.IssueKey) (result, error) {
+		var out result
+		out.history = map[domain.IssueKey][]domain.StatusChange{}
+
+		quoted := make([]string, 0, len(chunk))
+		for _, key := range chunk {
+			quoted = append(quoted, `"`+string(key)+`"`)
+		}
+		jql := "key IN (" + strings.Join(quoted, ",") + ") ORDER BY key ASC"
+
+		err := t.eachSearchPage(ctx, jql, []string{"summary"}, "changelog", func(_ []issueJSON, raw []json.RawMessage) error {
+			for _, entry := range raw {
+				var envelope struct {
+					Key       string               `json:"key"`
+					Changelog *inlineChangelogJSON `json:"changelog"`
+				}
+				if err := json.Unmarshal(entry, &envelope); err != nil {
+					return fmt.Errorf("decoding issue: %w", err)
+				}
+				out.sawIssue = true
+				if envelope.Changelog == nil {
+					// The expand was ignored. Nothing in this chunk can be
+					// trusted, and neither can any other.
+					out.sawGap = true
+					return nil
+				}
+				key := domain.IssueKey(envelope.Key)
+				if envelope.Changelog.truncated() {
+					out.truncated = append(out.truncated, key)
+					continue
+				}
+				changes, err := statusChangesIn(envelope.Changelog.Histories, key, statuses)
+				if err != nil {
+					return err
+				}
+				if len(changes) > 0 {
+					out.history[key] = changes
+				}
+			}
+			return nil
+		})
+		return out, err
+	})
+	if err != nil {
+		// A refusal is a fact about the site and is worth remembering;
+		// anything else is this request's problem alone.
+		if refusesExpand(err) {
+			t.refuseExpand(err)
+			return nil, nil, false, nil
+		}
+		return nil, nil, false, err
+	}
+
+	history = make(map[domain.IssueKey][]domain.StatusChange, len(keys))
+	sawIssue := false
+	for _, out := range results {
+		if out.sawGap {
+			t.refuseExpand(nil)
+			return nil, nil, false, nil
+		}
+		sawIssue = sawIssue || out.sawIssue
+		for key, changes := range out.history {
+			history[key] = changes
+		}
+		truncated = append(truncated, out.truncated...)
+	}
+	if !sawIssue {
+		// No evidence either way. Fall back for this call without concluding
+		// anything permanent about the site.
+		return nil, nil, false, nil
+	}
+	return history, truncated, true, nil
+}
+
+// changelogsFor reads one changelog per issue. It is the fallback, and on a
+// site that inlines changelogs it runs for at most a handful of issues.
+func (t *Tracker) changelogsFor(
+	ctx context.Context,
+	keys []domain.IssueKey,
+	statuses map[string]domain.IssueStatus,
+) (map[domain.IssueKey][]domain.StatusChange, error) {
 	// One request per issue, but concurrently: nothing about one issue's
 	// changelog depends on another's, and serially this was the single largest
 	// block of wall-clock time in a build.
@@ -510,6 +659,60 @@ func (t *Tracker) StatusHistory(ctx context.Context, keys []domain.IssueKey) (ma
 	return history, nil
 }
 
+func chunkKeys(keys []domain.IssueKey, size int) [][]domain.IssueKey {
+	chunks := make([][]domain.IssueKey, 0, (len(keys)+size-1)/size)
+	for start := 0; start < len(keys); start += size {
+		end := start + size
+		if end > len(keys) {
+			end = len(keys)
+		}
+		chunks = append(chunks, keys[start:end])
+	}
+	return chunks
+}
+
+// refusesExpand reports whether a failure says the site cannot do this at all,
+// as opposed to this request having gone wrong.
+//
+// 400 is a rejected parameter, 404 an endpoint that is not there, and 410 the
+// deprecated search endpoint on a site that has retired it. All three are facts
+// about the site. Anything else — a timeout, a 500, a rate limit — is this
+// request's problem and must not disable the fast path for the whole process.
+func refusesExpand(err error) bool {
+	var status *httpclient.StatusError
+	if !errors.As(err, &status) {
+		return false
+	}
+	switch status.StatusCode {
+	case http.StatusBadRequest, http.StatusNotFound, http.StatusGone:
+		return true
+	}
+	return false
+}
+
+func (t *Tracker) expandKnownRefused() bool {
+	t.expandMu.Lock()
+	defer t.expandMu.Unlock()
+	return t.expandRefused
+}
+
+// refuseExpand records that this site will not inline changelogs, and says so
+// once. The consequence is real — a request per sub-task on every build — and
+// invisible otherwise.
+func (t *Tracker) refuseExpand(cause error) {
+	t.expandMu.Lock()
+	already := t.expandRefused
+	t.expandRefused = true
+	t.expandMu.Unlock()
+
+	if already {
+		return
+	}
+	t.logger.Warn("this Jira site will not attach changelogs to a search",
+		slog.String("consequence", "status history now costs one request per sub-task on every retrospective"),
+		slog.Any("error", cause))
+}
+
 func (t *Tracker) changelogFor(ctx context.Context, key domain.IssueKey, statuses map[string]domain.IssueStatus) ([]domain.StatusChange, error) {
 	var changes []domain.StatusChange
 
@@ -524,22 +727,11 @@ func (t *Tracker) changelogFor(ctx context.Context, key domain.IssueKey, statuse
 			return nil, fmt.Errorf("changelog for %s: %w", key, err)
 		}
 
-		for _, entry := range page.Values {
-			at, err := parseTime(entry.Created)
-			if err != nil {
-				return nil, fmt.Errorf("changelog entry for %s: %w", key, err)
-			}
-			for _, item := range entry.Items {
-				if !strings.EqualFold(item.Field, "status") {
-					continue
-				}
-				changes = append(changes, domain.StatusChange{
-					At:   at,
-					From: resolveStatus(statuses, item.From, item.FromString),
-					To:   resolveStatus(statuses, item.To, item.ToString),
-				})
-			}
+		decoded, err := statusChangesIn(page.Values, key, statuses)
+		if err != nil {
+			return nil, err
 		}
+		changes = append(changes, decoded...)
 
 		// Advance by what the server actually returned, never by what was
 		// asked for. Jira caps maxResults per endpoint, so adding the requested
@@ -551,6 +743,34 @@ func (t *Tracker) changelogFor(ctx context.Context, key domain.IssueKey, statuse
 	}
 
 	sort.SliceStable(changes, func(i, j int) bool { return changes[i].At.Before(changes[j].At) })
+	return changes, nil
+}
+
+// statusChangesIn turns changelog entries into status transitions, dropping
+// every other kind of field change.
+//
+// It is shared by both sources deliberately. The per-issue endpoint and the
+// search expand return the same entries under different names, and decoding
+// them twice would be two chances to disagree about what a transition is.
+func statusChangesIn(entries []changelogJSON, key domain.IssueKey, statuses map[string]domain.IssueStatus) ([]domain.StatusChange, error) {
+	var changes []domain.StatusChange
+
+	for _, entry := range entries {
+		at, err := parseTime(entry.Created)
+		if err != nil {
+			return nil, fmt.Errorf("changelog entry for %s: %w", key, err)
+		}
+		for _, item := range entry.Items {
+			if !strings.EqualFold(item.Field, "status") {
+				continue
+			}
+			changes = append(changes, domain.StatusChange{
+				At:   at,
+				From: resolveStatus(statuses, item.From, item.FromString),
+				To:   resolveStatus(statuses, item.To, item.ToString),
+			})
+		}
+	}
 	return changes, nil
 }
 

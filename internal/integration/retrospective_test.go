@@ -109,10 +109,25 @@ func routeJQL(body []byte) (string, bool) {
 		return sprintParentsResponse, true
 	case strings.HasPrefix(request.JQL, "parent IN "):
 		return subTasksResponse, true
+	case strings.HasPrefix(request.JQL, "key IN "):
+		return statusHistoryResponse, true
 	default:
 		return "", false
 	}
 }
+
+// This site attaches changelogs to a search, so the whole sprint's status
+// history arrives in one request. The per-issue changelog fixtures above stay
+// as the fallback for a site that will not.
+const statusHistoryResponse = `{"issues":[
+	{"key":"PROJ-10","changelog":{"startAt":0,"maxResults":100,"total":1,"histories":[
+		{"created":"2026-08-04T09:00:00.000-0400","items":[
+			{"field":"status","from":"10039","fromString":"To Do","to":"3","toString":"In Progress"}]}]}},
+	{"key":"PROJ-11","changelog":{"startAt":0,"maxResults":100,"total":1,"histories":[
+		{"created":"2026-08-04T09:00:00.000-0400","items":[
+			{"field":"status","from":"10039","fromString":"To Do","to":"3","toString":"In Progress"}]}]}},
+	{"key":"PROJ-20","changelog":{"startAt":0,"maxResults":100,"total":0,"histories":[]}},
+	{"key":"PROJ-30","changelog":{"startAt":0,"maxResults":100,"total":0,"histories":[]}}]}`
 
 var githubRoutes = map[string]string{
 	"/repos/acme/service": `{"default_branch":"dev"}`,
@@ -258,6 +273,22 @@ func TestRetrospectiveNeverScansTheProjectToFindItsSprint(t *testing.T) {
 	}
 	if !jiraCalls.contains("GET /rest/agile/1.0/sprint/7354") {
 		t.Error("the sprint was not fetched by id")
+	}
+}
+
+// A whole sprint's status history in one search, rather than one request per
+// sub-task. The per-issue fixtures remain in jiraRoutes precisely so that a
+// regression here shows up as extra requests rather than as a failure.
+func TestRetrospectiveReadsStatusHistoryFromTheSearch(t *testing.T) {
+	handler, jiraCalls := buildStackRecording(t)
+
+	if body := fetch(t, handler, "/api/v1/projects/team/sprints/7354/retrospective"); len(body.Parents) == 0 {
+		t.Fatal("no parents in the response")
+	}
+	for _, key := range []string{"PROJ-10", "PROJ-11", "PROJ-20", "PROJ-30"} {
+		if jiraCalls.contains("GET /rest/api/3/issue/" + key + "/changelog") {
+			t.Errorf("%s's changelog was fetched on its own despite arriving with the search", key)
+		}
 	}
 }
 
