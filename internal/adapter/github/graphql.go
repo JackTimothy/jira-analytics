@@ -79,7 +79,7 @@ func PullDetailQuery(numbers []int) string {
 	fmt.Fprintf(&b, `
 fragment prDetail on PullRequest {
   number
-  commits(first:1){ totalCount nodes{ commit{ committedDate } } }
+  commits(first:1){ totalCount nodes{ commit{ authoredDate committedDate } } }
   reviews(first:%d){
     totalCount
     pageInfo{ hasNextPage }

@@ -103,6 +103,7 @@ type graphPullJSON struct {
 		TotalCount int `json:"totalCount"`
 		Nodes      []struct {
 			Commit struct {
+				AuthoredDate  time.Time `json:"authoredDate"`
 				CommittedDate time.Time `json:"committedDate"`
 			} `json:"commit"`
 		} `json:"nodes"`
@@ -177,7 +178,10 @@ func (p graphPullJSON) toDetail() (pullDetail, error) {
 	}
 
 	if len(p.Commits.Nodes) > 0 {
-		detail.FirstCommit = p.Commits.Nodes[0].Commit.CommittedDate
+		commit := p.Commits.Nodes[0].Commit
+		// The earlier of the two, for the same reason the REST path does it:
+		// a rebase moves the committer date to the rebase.
+		detail.FirstCommit = earlier(commit.AuthoredDate, commit.CommittedDate)
 	}
 
 	for _, review := range p.Reviews.Nodes {

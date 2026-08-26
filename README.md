@@ -272,6 +272,19 @@ retrospective built project=otco sprint=7354 sprint=0.3s parents=0.4s
 
 Phases overlap, so they will not sum to the total — that is the overlap working.
 
+The code host reports its own stages the same way, one line per repository,
+because "the code host took eight seconds" is not a finding and which of its
+four stages took them is:
+
+```
+code activity read repo=acme/service pull_listing=7.4s branch_listing=0.3s
+  pull_detail=0.4s orphan_branches=0.2s total=7.9s pulls=35 branches=4
+```
+
+Two rounds of optimisation went into the wrong stage for want of exactly this
+line: removing a hundred requests from `pull_detail` changed the total by
+nothing, because `pull_listing` was the whole cost and always had been.
+
 ### Finding the code
 
 Work is linked to an issue by the issue key, from two directions.

@@ -20,10 +20,39 @@ type compareJSON struct {
 
 type commitJSON struct {
 	Commit struct {
+		Author struct {
+			Date time.Time `json:"date"`
+		} `json:"author"`
 		Committer struct {
 			Date time.Time `json:"date"`
 		} `json:"committer"`
 	} `json:"commit"`
+}
+
+// startedAt is when the work in this commit was actually done.
+//
+// A rebase rewrites the committer date to the moment of the rebase while
+// leaving the author date alone, so on a team that rebases routinely the
+// committer date of a branch's first commit is the rebase, not the start of the
+// work. Taking the earlier of the two keeps the timeline honest, and survives
+// the reverse case too — an amended or replayed commit whose author date has
+// drifted later than its committer date.
+func (c commitJSON) startedAt() time.Time {
+	return earlier(c.Commit.Author.Date, c.Commit.Committer.Date)
+}
+
+// earlier returns the earlier of two times, ignoring either if it is unset.
+func earlier(a, b time.Time) time.Time {
+	switch {
+	case a.IsZero():
+		return b
+	case b.IsZero():
+		return a
+	case a.Before(b):
+		return a
+	default:
+		return b
+	}
 }
 
 type userJSON struct {

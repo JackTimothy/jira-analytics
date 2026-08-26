@@ -175,7 +175,8 @@ func graphQLFirstCommit(restJSON string) string {
 	if len(rest) == 0 {
 		return "[]"
 	}
-	return fmt.Sprintf(`[{"commit":{"committedDate":%q}}]`,
+	return fmt.Sprintf(`[{"commit":{"authoredDate":%q,"committedDate":%q}}]`,
+		rest[0].Commit.Author.Date.Format(time.RFC3339),
 		rest[0].Commit.Committer.Date.Format(time.RFC3339))
 }
 

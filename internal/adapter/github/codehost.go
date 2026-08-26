@@ -163,15 +163,22 @@ func (c *CodeHost) eventsInRepo(
 	// that finished. The branch listing is needed anyway, for work that has no
 	// pull request yet, and the two do not depend on each other.
 	var (
-		pulls    []pullMatch
-		branches []branchMatch
+		pulls         []pullMatch
+		branches      []branchMatch
+		listing       time.Duration
+		branchListing time.Duration
 	)
+	started := time.Now()
 	err := parallel.ForEach(ctx, []int{0, 1}, 2, func(ctx context.Context, which int) error {
 		var err error
 		if which == 0 {
+			at := time.Now()
 			pulls, err = c.pullsInWindow(ctx, repo, window, matcher)
+			listing = time.Since(at)
 		} else {
+			at := time.Now()
 			branches, err = c.matchingBranches(ctx, repo, keys, matcher)
+			branchListing = time.Since(at)
 		}
 		return err
 	})
@@ -193,11 +200,14 @@ func (c *CodeHost) eventsInRepo(
 		}
 	}
 
+	detailStart := time.Now()
 	if err := c.recordPullEvents(ctx, repo, pulls, policy, record); err != nil {
 		return err
 	}
+	detail := time.Since(detailStart)
 
-	return parallel.ForEach(ctx, orphans, maxConcurrency, func(ctx context.Context, match branchMatch) error {
+	orphanStart := time.Now()
+	err = parallel.ForEach(ctx, orphans, maxConcurrency, func(ctx context.Context, match branchMatch) error {
 		firstSeen, err := c.branchFirstSeen(ctx, repo, match.name)
 		if err != nil {
 			return err
@@ -207,6 +217,21 @@ func (c *CodeHost) eventsInRepo(
 		})
 		return nil
 	})
+
+	// One line per repository, because "the code host took eight seconds" is
+	// not a finding — which of its four stages took them is. Two rounds of this
+	// work were spent optimising the wrong stage for want of exactly this.
+	c.logger.Info("code activity read",
+		slog.String("repo", repo.String()),
+		slog.Duration("pull_listing", listing.Round(time.Millisecond)),
+		slog.Duration("branch_listing", branchListing.Round(time.Millisecond)),
+		slog.Duration("pull_detail", detail.Round(time.Millisecond)),
+		slog.Duration("orphan_branches", time.Since(orphanStart).Round(time.Millisecond)),
+		slog.Duration("total", time.Since(started).Round(time.Millisecond)),
+		slog.Int("pulls", len(pulls)),
+		slog.Int("branches", len(orphans)))
+
+	return err
 }
 
 type pullMatch struct {
@@ -224,13 +249,30 @@ const pullLookback = 120 * 24 * time.Hour
 // outside it not to matter.
 const maxPullPages = 20
 
-// pullPageWave is how many pages of the listing are fetched at once.
+// The listing is fetched in waves, and the wave grows.
 //
-// The stop condition is only known after a page has been read, so a wave
-// over-fetches by up to three pages at the boundary. That is the trade being
-// made deliberately: three wasted requests against up to twenty serial round
-// trips, on a listing where a busy monorepo genuinely reaches double figures.
-const pullPageWave = 4
+// It is the slowest thing left in a build: each page carries a hundred full
+// pull request objects, megabytes of them, so a page costs far more than a
+// typical request. A busy monorepo needs every one of maxPullPages, and at a
+// fixed wave of four that was five sequential rounds and essentially the whole
+// of the code phase — measured at ~8s against a real repository, unmoved by
+// removing a hundred other requests.
+//
+// A quiet repository needs one page. So the first wave stays small, which costs
+// it nothing, and every wave after it is large, which gets a busy repository to
+// twenty pages in two rounds instead of five. The stop condition is only known
+// after a page has been read, so a wave over-fetches at the boundary; that is
+// the trade, and it is a good one at roughly a second and a half per round.
+const (
+	firstPullPageWave = 4
+	nextPullPageWave  = 16
+)
+
+// maxPageConcurrency bounds the listing separately from everything else. Pages
+// are few, large and slow, so they want more parallelism than the many small
+// requests the rest of the adapter makes — and they are plain reads of one
+// endpoint, which is the shape GitHub's secondary limits tolerate best.
+const maxPageConcurrency = 10
 
 // pullsInWindow lists the repository's pull requests touching the sprint window
 // and keeps those naming an issue we care about.
@@ -248,13 +290,14 @@ func (c *CodeHost) pullsInWindow(ctx context.Context, repo domain.RepoRef, windo
 	// stop on its own.
 	seen := map[int]struct{}{}
 
-	for first := 1; first <= maxPullPages; first += pullPageWave {
-		pages := make([]int, 0, pullPageWave)
-		for page := first; page < first+pullPageWave && page <= maxPullPages; page++ {
+	for first, wave := 1, firstPullPageWave; first <= maxPullPages; wave = nextPullPageWave {
+		pages := make([]int, 0, wave)
+		for page := first; page < first+wave && page <= maxPullPages; page++ {
 			pages = append(pages, page)
 		}
+		first += len(pages)
 
-		fetched, err := parallel.Map(ctx, pages, maxConcurrency, func(ctx context.Context, page int) ([]pullJSON, error) {
+		fetched, err := parallel.Map(ctx, pages, maxPageConcurrency, func(ctx context.Context, page int) ([]pullJSON, error) {
 			return c.pullPage(ctx, repo, page)
 		})
 		if err != nil {
@@ -455,7 +498,7 @@ func (c *CodeHost) branchFirstSeen(ctx context.Context, repo domain.RepoRef, bra
 	if len(comparison.Commits) == 0 {
 		return time.Time{}, nil
 	}
-	return comparison.Commits[0].Commit.Committer.Date, nil
+	return comparison.Commits[0].startedAt(), nil
 }
 
 func (c *CodeHost) defaultBranch(ctx context.Context, repo domain.RepoRef) (string, error) {
@@ -666,7 +709,7 @@ func (c *CodeHost) firstCommitOf(ctx context.Context, repo domain.RepoRef, numbe
 	if len(commits) == 0 {
 		return time.Time{}, nil
 	}
-	return commits[0].Commit.Committer.Date, nil
+	return commits[0].startedAt(), nil
 }
 
 func (c *CodeHost) timelineFor(ctx context.Context, repo domain.RepoRef, number int) ([]timelineEventJSON, error) {

@@ -73,8 +73,13 @@ var fixtures = map[string]string{
 	"/repos/org/repo/pulls/8/reviews":   `[]`,
 	"/repos/org/repo/issues/8/timeline": `[]`,
 
-	"/repos/org/repo/pulls/8/commits": `[{"commit":{"committer":{"date":"2026-08-06T13:00:00Z"}}}]`,
-	"/repos/org/repo/pulls/9/commits": `[{"commit":{"committer":{"date":"2026-08-04T13:00:00Z"}}}]`,
+	"/repos/org/repo/pulls/8/commits": `[{"commit":{
+		"author":{"date":"2026-08-06T13:00:00Z"},"committer":{"date":"2026-08-06T13:00:00Z"}}}]`,
+
+	// Rebased before merging, which is routine: the committer date is the
+	// rebase, four days after the work was actually done.
+	"/repos/org/repo/pulls/9/commits": `[{"commit":{
+		"author":{"date":"2026-08-04T13:00:00Z"},"committer":{"date":"2026-08-08T17:00:00Z"}}}]`,
 }
 
 func newFakeGitHub(t *testing.T) (*CodeHost, *requestLog) {
@@ -517,9 +522,9 @@ func TestPullsInWindowIgnoresARepeatedListing(t *testing.T) {
 	// A wave is fetched at once, so the repeat is only detected after the whole
 	// of it has arrived — that over-fetch is the deliberate cost of not paging
 	// serially. What must not happen is a second wave.
-	if pages.Load() > pullPageWave {
-		t.Errorf("kept paging a listing that repeated itself: %d pages, want at most one wave of %d",
-			pages.Load(), pullPageWave)
+	if pages.Load() > firstPullPageWave {
+		t.Errorf("kept paging a listing that repeated itself: %d pages, want at most the first wave of %d",
+			pages.Load(), firstPullPageWave)
 	}
 }
 
@@ -969,5 +974,140 @@ func TestExtraCommitsAreNotTruncation(t *testing.T) {
 	}
 	if pull.truncated() {
 		t.Error("a pull request with more than one commit was marked truncated")
+	}
+}
+
+// A rebase rewrites the committer date to the moment of the rebase and leaves
+// the author date alone. On a team that rebases before merging, trusting the
+// committer date makes every rebased sub-task look as though work began days
+// after it did — and the chart gives no hint that anything is off.
+func TestStartedAtPrefersTheEarlierOfAuthorAndCommitterDates(t *testing.T) {
+	authored := time.Date(2026, 8, 4, 13, 0, 0, 0, time.UTC)
+	rebasedAt := time.Date(2026, 8, 8, 17, 0, 0, 0, time.UTC)
+
+	var rebased commitJSON
+	rebased.Commit.Author.Date = authored
+	rebased.Commit.Committer.Date = rebasedAt
+	if got := rebased.startedAt(); !got.Equal(authored) {
+		t.Errorf("rebased commit started at %s, want the author date %s", got, authored)
+	}
+
+	// The reverse can happen too — an amended commit whose author date drifted
+	// later — and the earlier of the two is still the right answer.
+	var amended commitJSON
+	amended.Commit.Author.Date = rebasedAt
+	amended.Commit.Committer.Date = authored
+	if got := amended.startedAt(); !got.Equal(authored) {
+		t.Errorf("amended commit started at %s, want %s", got, authored)
+	}
+
+	// A missing date must not win by being zero.
+	var partial commitJSON
+	partial.Commit.Committer.Date = rebasedAt
+	if got := partial.startedAt(); !got.Equal(rebasedAt) {
+		t.Errorf("commit with no author date started at %s, want %s", got, rebasedAt)
+	}
+}
+
+// The fixture for pull request 9 is rebased, so this pins the end-to-end
+// consequence rather than only the helper.
+func TestARebasedBranchIsChartedFromWhenTheWorkWasDoneNotTheRebase(t *testing.T) {
+	for name, mode := range map[string]graphQLMode{
+		"over GraphQL": graphQLNormal,
+		"over REST":    graphQLAlwaysTruncated,
+	} {
+		t.Run(name, func(t *testing.T) {
+			events := linkedEventsIn(t, mode)
+
+			var firstSeen time.Time
+			for _, event := range events["PROJ-10"] {
+				if branch, ok := event.(domain.BranchFirstSeen); ok {
+					firstSeen = branch.At
+				}
+			}
+			want := time.Date(2026, 8, 4, 13, 0, 0, 0, time.UTC)
+			if !firstSeen.Equal(want) {
+				t.Errorf("branch first seen at %s, want the author date %s — the rebase was believed",
+					firstSeen, want)
+			}
+		})
+	}
+}
+
+// The listing is the slowest thing in a build — each page carries a hundred
+// full pull request objects — so the number of sequential rounds is what
+// matters, not the number of requests. A quiet repository must still pay for
+// only one round.
+func TestTheListingWaveGrowsAfterTheFirstRound(t *testing.T) {
+	pageFor := func(page, lastPage int) string {
+		if page > lastPage {
+			return `[]`
+		}
+		entries := make([]string, 0, 100)
+		for i := 0; i < 100; i++ {
+			entries = append(entries, fmt.Sprintf(`{"number":%d,"title":"PROJ-10 work","draft":false,
+				"created_at":"2026-08-05T13:00:00Z","updated_at":"2026-08-09T13:00:00Z",
+				"head":{"ref":"PROJ-10-work"}}`, page*1000+i))
+		}
+		return "[" + strings.Join(entries, ",") + "]"
+	}
+
+	for name, tc := range map[string]struct {
+		lastPage   int
+		wantRounds int
+	}{
+		// One short page: the small first wave is all a quiet repository pays.
+		"a quiet repository": {lastPage: 1, wantRounds: 1},
+		// Twenty full pages: the first wave of four, then one large wave.
+		"a busy monorepo": {lastPage: maxPullPages, wantRounds: 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var mu sync.Mutex
+			var rounds []int
+			var inFlight, peak int
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+
+				mu.Lock()
+				inFlight++
+				if inFlight > peak {
+					peak = inFlight
+				}
+				rounds = append(rounds, page)
+				mu.Unlock()
+
+				// Hold every request briefly so a wave is genuinely in flight
+				// together and the peak reflects the wave size.
+				time.Sleep(20 * time.Millisecond)
+
+				mu.Lock()
+				inFlight--
+				mu.Unlock()
+
+				io.WriteString(w, pageFor(page, tc.lastPage))
+			}))
+			defer server.Close()
+
+			host := NewCodeHost(Config{BaseURL: server.URL, Token: "t"},
+				httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })))
+
+			if _, err := host.pullsInWindow(context.Background(), testRepo, testGitHubWindow,
+				newKeyMatcher([]domain.IssueKey{"PROJ-10"})); err != nil {
+				t.Fatalf("pullsInWindow: %v", err)
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if tc.wantRounds == 1 && len(rounds) != firstPullPageWave {
+				t.Errorf("fetched %d pages, want only the first wave of %d", len(rounds), firstPullPageWave)
+			}
+			if peak < 2 {
+				t.Errorf("peak concurrency %d — the pages were fetched one at a time", peak)
+			}
+			if tc.wantRounds == 2 && peak <= firstPullPageWave {
+				t.Errorf("peak concurrency %d never exceeded the first wave, so the wave did not grow", peak)
+			}
+		})
 	}
 }
