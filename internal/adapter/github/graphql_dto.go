@@ -109,22 +109,37 @@ type graphPullJSON struct {
 	} `json:"commits"`
 	Reviews struct {
 		TotalCount int                 `json:"totalCount"`
+		PageInfo   pageInfoJSON        `json:"pageInfo"`
 		Nodes      []graphQLReviewJSON `json:"nodes"`
 	} `json:"reviews"`
 	TimelineItems struct {
 		TotalCount int                   `json:"totalCount"`
+		PageInfo   pageInfoJSON          `json:"pageInfo"`
 		Nodes      []graphQLTimelineJSON `json:"nodes"`
 	} `json:"timelineItems"`
 }
 
+type pageInfoJSON struct {
+	HasNextPage bool `json:"hasNextPage"`
+}
+
 // truncated reports whether the caps cut anything off.
 //
-// Commits are excluded on purpose: only the first is ever asked for, so
-// totalCount always exceeds it on a pull request with more than one commit and
-// treating that as truncation would refetch every one of them.
+// hasNextPage, not totalCount. The timeline connection is filtered by
+// itemTypes, and its totalCount counts the whole timeline — comments, labels,
+// commits, cross-references — rather than the seven event types asked for. A
+// busy pull request therefore reports a total far larger than the nodes it
+// returned while having lost nothing at all, which made this fire on every pull
+// request in a real repository and quietly sent all of them back to the REST
+// path the batch exists to avoid.
+//
+// hasNextPage is scoped to the connection as filtered, so it answers the
+// question actually being asked: is there more of what I requested.
+//
+// Commits are excluded either way: only the first is ever wanted, so a pull
+// request with two commits has a next page and has lost nothing.
 func (p graphPullJSON) truncated() bool {
-	return p.Reviews.TotalCount > len(p.Reviews.Nodes) ||
-		p.TimelineItems.TotalCount > len(p.TimelineItems.Nodes)
+	return p.Reviews.PageInfo.HasNextPage || p.TimelineItems.PageInfo.HasNextPage
 }
 
 type graphQLReviewJSON struct {

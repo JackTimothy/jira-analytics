@@ -27,6 +27,14 @@ import (
 // listing two thousand pull requests would be twenty sequential round trips per
 // repository, where REST takes a page number and can fetch four at once.
 
+// ReviewCap and TimelineCap bound what one query carries. They are exported so
+// cmd/probe can report how close a real repository comes to them rather than
+// restating numbers that could drift out of step with these.
+const (
+	ReviewCap   = 30
+	TimelineCap = 60
+)
+
 const (
 	// graphQLBatchSize is how many pull requests go into one query. Ten keeps
 	// the node count — which is what GitHub actually bills — comfortably small
@@ -41,8 +49,8 @@ const (
 	// A pull request that exceeds them is detected by totalCount and refetched
 	// over REST, so the caps trade a rare extra request for a much cheaper
 	// common case rather than trading away correctness.
-	graphQLReviewCap   = 30
-	graphQLTimelineCap = 60
+	graphQLReviewCap   = ReviewCap
+	graphQLTimelineCap = TimelineCap
 )
 
 // timelineItemTypes filters the timeline server-side to the events that can
@@ -74,10 +82,12 @@ fragment prDetail on PullRequest {
   commits(first:1){ totalCount nodes{ commit{ committedDate } } }
   reviews(first:%d){
     totalCount
+    pageInfo{ hasNextPage }
     nodes{ state submittedAt author{ login __typename } }
   }
   timelineItems(first:%d, itemTypes:[%s]){
     totalCount
+    pageInfo{ hasNextPage }
     nodes{
       __typename
       ... on ReviewRequestedEvent      { createdAt requestedReviewer{ ...actor } }

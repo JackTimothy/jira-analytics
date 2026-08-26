@@ -3,6 +3,7 @@ package github
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -388,8 +389,8 @@ func TestLinkedEventsFindsMergedWorkAfterItsBranchIsDeleted(t *testing.T) {
 			// which is where this test's fixtures live.
 			io.WriteString(w, `{"data":{"repository":{"p0":{"number":4683,
 				"commits":{"totalCount":1,"nodes":[]},
-				"reviews":{"totalCount":99,"nodes":[]},
-				"timelineItems":{"totalCount":99,"nodes":[]}}}}}`)
+				"reviews":{"pageInfo":{"hasNextPage":true},"nodes":[]},
+				"timelineItems":{"pageInfo":{"hasNextPage":true},"nodes":[]}}}}}`)
 
 		case r.URL.Path == "/repos/org/repo/pulls/4683/commits":
 			io.WriteString(w, `[{"commit":{"committer":{"date":"2026-08-04T13:00:00Z"}}}]`)
@@ -919,5 +920,54 @@ func TestOnePullRequestDeniedByPathFallsBackForThatPullRequestOnly(t *testing.T)
 	}
 	if strings.Contains(log.String(), "cannot use the batched GraphQL query") {
 		t.Error("one denied pull request was mistaken for a credential that cannot use GraphQL at all")
+	}
+}
+
+// The timeline connection is filtered by itemTypes but its totalCount counts
+// the whole timeline, so on a real repository every pull request reported a
+// total far larger than the nodes it returned while having lost nothing. Read
+// as truncation, that sent all ten of ten pull requests back to the REST path
+// the batch exists to avoid — the optimisation silently buying nothing.
+func TestAnInflatedTotalCountIsNotMistakenForTruncation(t *testing.T) {
+	var pull graphPullJSON
+	if err := json.Unmarshal([]byte(`{"number":1,
+		"reviews":{"totalCount":400,"pageInfo":{"hasNextPage":false},"nodes":[{"state":"APPROVED"}]},
+		"timelineItems":{"totalCount":900,"pageInfo":{"hasNextPage":false},"nodes":[{"__typename":"MergedEvent"}]}}`), &pull); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+
+	if pull.truncated() {
+		t.Error("a totalCount larger than the returned nodes was read as truncation")
+	}
+}
+
+func TestHasNextPageIsWhatMarksAPullRequestTruncated(t *testing.T) {
+	for name, body := range map[string]string{
+		"reviews":  `{"number":1,"reviews":{"pageInfo":{"hasNextPage":true}},"timelineItems":{"pageInfo":{"hasNextPage":false}}}`,
+		"timeline": `{"number":1,"reviews":{"pageInfo":{"hasNextPage":false}},"timelineItems":{"pageInfo":{"hasNextPage":true}}}`,
+	} {
+		var pull graphPullJSON
+		if err := json.Unmarshal([]byte(body), &pull); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if !pull.truncated() {
+			t.Errorf("%s reported another page and was not marked truncated", name)
+		}
+	}
+}
+
+// Only the first commit is ever wanted, so a pull request with more commits has
+// a next page and has lost nothing. Counting that as truncation would refetch
+// every pull request that is not a single commit — which is most of them.
+func TestExtraCommitsAreNotTruncation(t *testing.T) {
+	var pull graphPullJSON
+	if err := json.Unmarshal([]byte(`{"number":1,
+		"commits":{"totalCount":37,"nodes":[{"commit":{"committedDate":"2026-08-04T13:00:00Z"}}]},
+		"reviews":{"pageInfo":{"hasNextPage":false}},
+		"timelineItems":{"pageInfo":{"hasNextPage":false}}}`), &pull); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if pull.truncated() {
+		t.Error("a pull request with more than one commit was marked truncated")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -114,23 +115,45 @@ func (p *githubProber) reportCost(answer batchAnswer, pulls int) {
 }
 
 func (p *githubProber) reportTruncation(answer batchAnswer) {
-	var truncated []int
-	for number, pull := range answer.pulls {
-		if pull.truncated {
-			truncated = append(truncated, number)
-		}
+	numbers := make([]int, 0, len(answer.pulls))
+	for number := range answer.pulls {
+		numbers = append(numbers, number)
 	}
-	sort.Ints(truncated)
+	sort.Ints(numbers)
 
-	if len(truncated) == 0 {
-		fmt.Printf("✓ the response caps\n  none of the sampled pull requests exceeded them\n" +
-			"  no REST refetches on a typical build\n\n")
-		return
+	var truncated []int
+	inflated := 0
+	worstReviews, worstTimeline := 0, 0
+
+	for _, number := range numbers {
+		pull := answer.pulls[number]
+		if pull.truncated() {
+			truncated = append(truncated, number)
+		} else if pull.reviewsTotal > pull.reviewsReturned || pull.timelineTotal > pull.timelineReturned {
+			// The signal that lies: totalCount on the filtered timeline counts
+			// the unfiltered whole, so it exceeds what came back on almost every
+			// busy pull request while nothing has been lost.
+			inflated++
+		}
+		worstReviews = max(worstReviews, pull.reviewsReturned)
+		worstTimeline = max(worstTimeline, pull.timelineReturned)
 	}
-	fmt.Printf("✓ the response caps\n  %d of %d sampled pull requests exceeded them: %v\n"+
-		"  those fall back to REST, which is the designed behaviour — raise the caps\n"+
-		"  in internal/adapter/github/graphql.go if this is most of them\n\n",
-		len(truncated), len(answer.pulls), truncated)
+
+	fmt.Printf("✓ the response caps\n"+
+		"  busiest sampled pull request used %d of %d review slots, %d of %d timeline slots\n",
+		worstReviews, github.ReviewCap, worstTimeline, github.TimelineCap)
+
+	if len(truncated) > 0 {
+		fmt.Printf("  %d of %d have another page and fall back to REST: %v\n",
+			len(truncated), len(answer.pulls), truncated)
+	} else {
+		fmt.Printf("  none has another page, so none falls back to REST\n")
+	}
+	if inflated > 0 {
+		fmt.Printf("  (%d report a totalCount larger than what came back; that counts the\n"+
+			"   unfiltered timeline rather than the events asked for, and is not truncation)\n", inflated)
+	}
+	fmt.Println()
 }
 
 // narrow finds the smallest query this credential will not serve.
@@ -208,8 +231,17 @@ type batchAnswer struct {
 
 type probedPull struct {
 	firstCommit time.Time
-	truncated   bool
+
+	// Both signals are kept because they disagree, and the disagreement is the
+	// finding: totalCount on a connection filtered by itemTypes counts the
+	// unfiltered whole, so it reports truncation where none happened.
+	reviewsReturned, reviewsTotal   int
+	reviewsMore                     bool
+	timelineReturned, timelineTotal int
+	timelineMore                    bool
 }
+
+func (p probedPull) truncated() bool { return p.reviewsMore || p.timelineMore }
 
 func (p *githubProber) batch(ctx context.Context, owner, name string, numbers []int) (batchAnswer, error) {
 	body := map[string]any{
@@ -234,13 +266,15 @@ func (p *githubProber) batch(ctx context.Context, owner, name string, numbers []
 					} `json:"nodes"`
 				} `json:"commits"`
 				Reviews struct {
-					TotalCount int `json:"totalCount"`
+					TotalCount int          `json:"totalCount"`
+					PageInfo   pageInfoJSON `json:"pageInfo"`
 					Nodes      []struct {
 						State string `json:"state"`
 					} `json:"nodes"`
 				} `json:"reviews"`
 				TimelineItems struct {
-					TotalCount int `json:"totalCount"`
+					TotalCount int          `json:"totalCount"`
+					PageInfo   pageInfoJSON `json:"pageInfo"`
 					Nodes      []struct {
 						TypeName string `json:"__typename"`
 					} `json:"nodes"`
@@ -268,7 +302,11 @@ func (p *githubProber) batch(ctx context.Context, owner, name string, numbers []
 	for _, item := range envelope.Errors {
 		message := strings.TrimSpace(item.Type + " " + item.Message)
 		if alias := aliasIn(item.Path); alias != "" {
-			denied = append(denied, alias)
+			// Several fields of one pull request can each be denied, so
+			// the same alias arrives more than once.
+			if !slices.Contains(denied, alias) {
+				denied = append(denied, alias)
+			}
 			continue
 		}
 		global = append(global, message+describePath(item.Path))
@@ -283,8 +321,12 @@ func (p *githubProber) batch(ctx context.Context, owner, name string, numbers []
 			continue
 		}
 		probed := probedPull{
-			truncated: pull.Reviews.TotalCount > len(pull.Reviews.Nodes) ||
-				pull.TimelineItems.TotalCount > len(pull.TimelineItems.Nodes),
+			reviewsReturned:  len(pull.Reviews.Nodes),
+			reviewsTotal:     pull.Reviews.TotalCount,
+			reviewsMore:      pull.Reviews.PageInfo.HasNextPage,
+			timelineReturned: len(pull.TimelineItems.Nodes),
+			timelineTotal:    pull.TimelineItems.TotalCount,
+			timelineMore:     pull.TimelineItems.PageInfo.HasNextPage,
 		}
 		if len(pull.Commits.Nodes) > 0 {
 			probed.firstCommit = pull.Commits.Nodes[0].Commit.CommittedDate
@@ -396,4 +438,8 @@ func describePath(path []any) string {
 		parts = append(parts, fmt.Sprintf("%v", step))
 	}
 	return " (at " + strings.Join(parts, ".") + ")"
+}
+
+type pageInfoJSON struct {
+	HasNextPage bool `json:"hasNextPage"`
 }

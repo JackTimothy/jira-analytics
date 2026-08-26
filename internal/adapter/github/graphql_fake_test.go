@@ -107,18 +107,21 @@ func pullAsGraphQL(number string, mode graphQLMode) string {
 	timeline := graphQLTimeline(fixtures["/repos/org/repo/issues/"+number+"/timeline"])
 	commit := graphQLFirstCommit(fixtures["/repos/org/repo/pulls/"+number+"/commits"])
 
-	reviewTotal, timelineTotal := len(reviews), len(timeline)
+	more := "false"
 	if mode == graphQLAlwaysTruncated {
-		// More than were sent, which is exactly what truncation looks like.
-		reviewTotal += 10
-		timelineTotal += 10
+		more = "true"
 	}
 
+	// totalCount is deliberately reported as larger than the nodes returned,
+	// the way a filtered timeline connection really does report it. Nothing may
+	// read it as a truncation signal.
 	return fmt.Sprintf(`{"number":%s,
 		"commits":{"totalCount":1,"nodes":%s},
-		"reviews":{"totalCount":%d,"nodes":[%s]},
-		"timelineItems":{"totalCount":%d,"nodes":[%s]}}`,
-		number, commit, reviewTotal, strings.Join(reviews, ","), timelineTotal, strings.Join(timeline, ","))
+		"reviews":{"totalCount":%d,"pageInfo":{"hasNextPage":%s},"nodes":[%s]},
+		"timelineItems":{"totalCount":%d,"pageInfo":{"hasNextPage":%s},"nodes":[%s]}}`,
+		number, commit,
+		len(reviews)+50, more, strings.Join(reviews, ","),
+		len(timeline)+50, more, strings.Join(timeline, ","))
 }
 
 func graphQLReviews(restJSON string) []string {
