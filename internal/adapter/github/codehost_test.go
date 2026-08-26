@@ -2,11 +2,14 @@ package github
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -462,9 +465,9 @@ func TestPullsInWindowIgnoresARepeatedListing(t *testing.T) {
 	// A listing that hands back the same pull requests on every page would
 	// otherwise be replayed: a second "opened" event clears the merge recorded
 	// by the first, leaving the timeline oscillating between states.
-	var pages int
+	var pages atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		pages++
+		pages.Add(1)
 		var repeated []string
 		for i := 0; i < 100; i++ {
 			repeated = append(repeated, `{"number":1,"title":"PROJ-10 work","draft":false,
@@ -486,7 +489,167 @@ func TestPullsInWindowIgnoresARepeatedListing(t *testing.T) {
 	if len(matches) != 1 {
 		t.Errorf("got %d matches for one repeated pull request, want 1", len(matches))
 	}
-	if pages > 2 {
-		t.Errorf("kept paging a listing that repeated itself: %d pages", pages)
+	// A wave is fetched at once, so the repeat is only detected after the whole
+	// of it has arrived — that over-fetch is the deliberate cost of not paging
+	// serially. What must not happen is a second wave.
+	if pages.Load() > pullPageWave {
+		t.Errorf("kept paging a listing that repeated itself: %d pages, want at most one wave of %d",
+			pages.Load(), pullPageWave)
+	}
+}
+
+// Paging in waves fetches pages the scan turns out not to need. Those pages
+// must be discarded rather than merged in: the listing is newest-first, so
+// anything past the page that crossed the cutoff is older than the lookback and
+// has no business in the retrospective.
+func TestPullsInWindowDiscardsPagesFetchedPastTheCutoff(t *testing.T) {
+	// Page 2 crosses the cutoff. Pages 3 and 4 arrive in the same wave and
+	// carry pull requests that match the key but are far too old.
+	const stale = "2020-01-01T00:00:00Z"
+
+	page := func(number int, updated string) string {
+		var entries []string
+		for i := 0; i < 100; i++ {
+			entries = append(entries, fmt.Sprintf(`{"number":%d,"title":"PROJ-10 work","draft":false,
+				"created_at":"2026-08-05T13:00:00Z","updated_at":%q,
+				"head":{"ref":"PROJ-10-work"}}`, number+i, updated))
+		}
+		return "[" + strings.Join(entries, ",") + "]"
+	}
+
+	var requested sync.Map
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		requested.Store(n, true)
+		switch n {
+		case 1:
+			io.WriteString(w, page(1000, "2026-08-09T13:00:00Z"))
+		default:
+			// Everything from page 2 on is older than the lookback.
+			io.WriteString(w, page(1000+n*1000, stale))
+		}
+	}))
+	defer server.Close()
+
+	host := NewCodeHost(Config{BaseURL: server.URL, Token: "t"},
+		httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })))
+
+	matches, err := host.pullsInWindow(context.Background(), testRepo, testGitHubWindow,
+		newKeyMatcher([]domain.IssueKey{"PROJ-10"}))
+	if err != nil {
+		t.Fatalf("pullsInWindow: %v", err)
+	}
+
+	// Only page 1's hundred are inside the lookback.
+	if len(matches) != 100 {
+		t.Fatalf("got %d matches, want the 100 from page 1 — later pages in the wave leaked in", len(matches))
+	}
+	for _, match := range matches {
+		if match.pull.Number >= 2000 {
+			t.Fatalf("pull #%d came from a page past the cutoff", match.pull.Number)
+		}
+	}
+
+	// The over-fetch itself is expected; the test is that it was discarded.
+	if _, ok := requested.Load(3); !ok {
+		t.Log("page 3 was never requested; the wave may have been narrower than expected")
+	}
+}
+
+// Repositories share nothing but a read-only matcher, so one must not wait on
+// another.
+//
+// The gate is per repository rather than per request, because a single
+// repository already fires a wave of page requests concurrently — counting
+// requests would show plenty of concurrency without the repositories
+// overlapping at all.
+func TestLinkedEventsQueriesRepositoriesConcurrently(t *testing.T) {
+	var mu sync.Mutex
+	blocked := map[string]bool{}
+
+	release := make(chan struct{})
+	var once sync.Once
+	var timedOut atomic.Bool
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/pulls") {
+			repo := strings.Split(strings.TrimPrefix(r.URL.Path, "/repos/"), "/")[1]
+
+			mu.Lock()
+			first := !blocked[repo]
+			blocked[repo] = true
+			distinct := len(blocked)
+			mu.Unlock()
+
+			// Only the first request from each repository holds the gate, so
+			// the wave of pages behind it cannot satisfy the barrier alone.
+			if first {
+				if distinct >= 2 {
+					once.Do(func() { close(release) })
+				}
+				select {
+				case <-release:
+				case <-time.After(2 * time.Second):
+					timedOut.Store(true)
+				}
+			}
+		}
+		io.WriteString(w, `[]`)
+	}))
+	defer server.Close()
+
+	host := NewCodeHost(Config{BaseURL: server.URL, Token: "t"},
+		httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })))
+
+	repos := []domain.RepoRef{{Owner: "org", Name: "one"}, {Owner: "org", Name: "two"}}
+	if _, err := host.LinkedEvents(context.Background(), repos, domain.ReviewerPolicy{},
+		[]domain.IssueKey{"PROJ-10"}, testGitHubWindow); err != nil {
+		t.Fatalf("LinkedEvents: %v", err)
+	}
+
+	if timedOut.Load() {
+		t.Error("a repository waited alone at the barrier — the repositories are still queried one after the other")
+	}
+}
+
+// The timeline, reviews and commits of one pull request are three independent
+// reads. Serially they made every pull request three round trips deep.
+func TestEventsForPullRequestReadsItsThreeEndpointsConcurrently(t *testing.T) {
+	const endpoints = 3
+
+	var inFlight, peak atomic.Int32
+	release := make(chan struct{})
+	var once sync.Once
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		now := inFlight.Add(1)
+		for {
+			high := peak.Load()
+			if now <= high || peak.CompareAndSwap(high, now) {
+				break
+			}
+		}
+		if now >= endpoints {
+			once.Do(func() { close(release) })
+		}
+		select {
+		case <-release:
+		case <-time.After(2 * time.Second):
+		}
+		inFlight.Add(-1)
+		io.WriteString(w, `[]`)
+	}))
+	defer server.Close()
+
+	host := NewCodeHost(Config{BaseURL: server.URL, Token: "t"},
+		httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })))
+
+	pull := pullJSON{Number: 1, Title: "PROJ-10 work"}
+	pull.Head.Ref = "PROJ-10-work"
+	if _, err := host.eventsForPullRequest(context.Background(), testRepo, pull, domain.ReviewerPolicy{}); err != nil {
+		t.Fatalf("eventsForPullRequest: %v", err)
+	}
+	if peak.Load() < endpoints {
+		t.Errorf("peak concurrency was %d, want %d — the three reads still run in sequence", peak.Load(), endpoints)
 	}
 }
