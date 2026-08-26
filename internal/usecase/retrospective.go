@@ -2,8 +2,10 @@ package usecase
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/jacktimothy/jira-analytics/internal/domain"
@@ -77,7 +79,11 @@ func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (do
 
 	axis := domain.AxisSegments(sprint.Window(), project.Settings.Schedule(), location)
 
-	parents = selectScope(parents, sprint, location, req.Scope)
+	// Everything the sprint contains is fetched, whatever scope was asked for,
+	// and the scope is applied at the end. Filtering first would save a little
+	// on the request that follows and cost a full rebuild every time the reader
+	// flips the toggle — which they do constantly, because the comparison
+	// between the two is the point.
 	if len(parents) == 0 {
 		return domain.Retrospective{Sprint: sprint, Groups: nil, Axis: axis}, nil
 	}
@@ -90,19 +96,82 @@ func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (do
 		return domain.Retrospective{Sprint: sprint, Groups: nil, Axis: axis}, nil
 	}
 
-	subTaskKeys := subTaskKeysOf(subTasks)
-
-	history, err := r.statusHistory(ctx, trace, subTaskKeys)
+	history, codeEvents, err := r.facts(ctx, trace, project, subTaskKeysOf(subTasks), sprint.Window())
 	if err != nil {
 		return domain.Retrospective{}, err
 	}
 
-	codeEvents, err := r.linkedEvents(ctx, trace, project, subTaskKeys, sprint.Window())
-	if err != nil {
-		return domain.Retrospective{}, err
-	}
+	inScope := selectScope(parents, sprint, location, req.Scope)
+	return r.assemble(sprint, location, project.Settings.Schedule(), inScope, subTasks, history, codeEvents), nil
+}
 
-	return r.assemble(sprint, location, project.Settings.Schedule(), parents, subTasks, history, codeEvents), nil
+// facts gathers the planning history and the delivery events together.
+//
+// The two depend on the same sub-task keys and on nothing else from each other,
+// so running them one after the other simply added their durations. They are
+// also the two most expensive phases in a build, which makes this the one place
+// where overlapping is worth the concurrency.
+//
+// A plain WaitGroup rather than errgroup: the module depends on nothing beyond
+// yaml.v3, and two goroutines do not justify breaking that.
+func (r *Retrospective) facts(
+	ctx context.Context,
+	trace Trace,
+	project domain.Project,
+	subTaskKeys []domain.IssueKey,
+	window domain.Window,
+) (map[domain.IssueKey][]domain.StatusChange, map[domain.IssueKey][]domain.Event, error) {
+	// Cancelling on the first failure stops the other branch paying for a
+	// result that is already being discarded.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var (
+		history    map[domain.IssueKey][]domain.StatusChange
+		codeEvents map[domain.IssueKey][]domain.Event
+		historyErr error
+		codeErr    error
+		wg         sync.WaitGroup
+	)
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		history, historyErr = r.statusHistory(ctx, trace, subTaskKeys)
+		if historyErr != nil {
+			cancel()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		codeEvents, codeErr = r.linkedEvents(ctx, trace, project, subTaskKeys, window)
+		if codeErr != nil {
+			cancel()
+		}
+	}()
+	wg.Wait()
+
+	// Whichever branch failed first cancelled the other, so the survivor's
+	// error is usually nothing but that cancellation. Reporting it would send
+	// the reader looking at the wrong port entirely, so a real failure always
+	// wins over a cancellation — in either direction.
+	switch {
+	case isReal(historyErr):
+		return nil, nil, historyErr
+	case isReal(codeErr):
+		return nil, nil, codeErr
+	case historyErr != nil:
+		return nil, nil, historyErr
+	case codeErr != nil:
+		return nil, nil, codeErr
+	}
+	return history, codeEvents, nil
+}
+
+// isReal reports whether an error describes a genuine failure rather than this
+// function having cancelled the work itself.
+func isReal(err error) bool {
+	return err != nil && !errors.Is(err, context.Canceled)
 }
 
 // The fetches below are wrapped one method each so every outward call is timed
