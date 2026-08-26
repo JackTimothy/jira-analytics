@@ -1,20 +1,37 @@
 /*
  * Design tokens.
  *
- * The seven timeline states are not seven independent identities. Five of them
- * are an ordered progression - a funnel from not-started to merged - and are
- * encoded as a single-hue ordinal ramp, validated for monotone lightness,
- * visible step gaps and surface contrast in both modes. The other two are
- * reserved status colours for the states that mean "stop and look": feedback
- * outstanding, and blocked.
+ * The seven timeline states are seven identities, not one ordered scale. They
+ * were previously a single-hue ordinal ramp - five steps of blue for the
+ * progression from not-started to merged, plus two reserved status colours.
+ * That encoded the ordering faithfully and failed at the only job the chart
+ * actually has: five blues a few steps apart are not tellable apart in a bar a
+ * few pixels wide, and the reader already has the ordering, from the legend and
+ * from the shape of the work.
  *
- * Encoding the progression as one ramp rather than seven hues is what makes the
- * chart colourblind-safe. Seven independent hues cannot clear the separation
- * floors at once, and the obvious semantic choice - green for done, red for
- * blocked - is the single worst pair under deuteranopia.
+ * So each state now gets its own hue, chosen against a validated separation
+ * floor rather than by eye. Every pair clears a normal-vision difference of 15
+ * (OKLab x100) - every pair, not just neighbouring ones, since any two states
+ * can end up side by side on a timeline. Worst pair 15.9 light, 16.3 dark.
  *
- * In each mode the earliest stage sits nearest the surface, so unstarted work
- * recedes and finished work stands out.
+ * Two are reserved status colours and keep their meaning: amber for feedback
+ * outstanding, red for blocked. To Do is the one deliberate neutral - nothing
+ * has happened yet, and being the only desaturated slot is itself a
+ * distinction. It is a mid grey rather than a pale one because a sub-task
+ * sitting in To Do for a week is a finding, not background.
+ *
+ * Three checks are knowingly unmet, and the reasons matter more than the
+ * failures:
+ *
+ *   - Colourblind separation, waived on request: telling the states apart in
+ *     full colour came first. Blue/violet and green/red are the two worst pairs
+ *     under deuteranopia and both are in play here. The legend, the tooltips
+ *     and the table view carry identity without colour, so nothing is conveyed
+ *     by hue alone - but a colourblind-safe palette means giving up hue
+ *     separation somewhere, and is a deliberate revisit, not an oversight.
+ *   - The dark lightness band. Holding every dark step inside it pushes cyan
+ *     and blue back to a difference of 13, under the floor. Legibility wins.
+ *   - The chroma floor on To Do, which is the neutral described above.
  */
 :root {
   color-scheme: light;
@@ -27,13 +44,12 @@
   --gridline: #e1e0d9;
   --border: #e1e0d9;
 
-  --state-to-do: #86b6ef;
-  --state-in-progress: #5598e7;
-  --state-review-requested: #2a78d6;
-  --state-approved: #1c5cab;
-  --state-done: #104281;
-
+  --state-to-do: #7d7b75;
+  --state-in-progress: #2a78d6;
+  --state-review-requested: #a02fd8;
   --state-feedback-given: #fab219;
+  --state-approved: #16b3c4;
+  --state-done: #158a30;
   --state-blocked: #d03b3b;
 
   --focus: #2a78d6;
@@ -51,11 +67,13 @@
     --gridline: #2c2c2a;
     --border: #2c2c2a;
 
-    --state-to-do: #256abf;
+    --state-to-do: #8b8983;
     --state-in-progress: #3987e5;
-    --state-review-requested: #6da7ec;
-    --state-approved: #9ec5f4;
-    --state-done: #cde2fb;
+    --state-review-requested: #c86fdd;
+    --state-feedback-given: #fab219;
+    --state-approved: #38c2cf;
+    --state-done: #4caf50;
+    --state-blocked: #e85959;
 
     --focus: #6da7ec;
   }
@@ -72,11 +90,13 @@
   --gridline: #2c2c2a;
   --border: #2c2c2a;
 
-  --state-to-do: #256abf;
+  --state-to-do: #8b8983;
   --state-in-progress: #3987e5;
-  --state-review-requested: #6da7ec;
-  --state-approved: #9ec5f4;
-  --state-done: #cde2fb;
+  --state-review-requested: #c86fdd;
+  --state-feedback-given: #fab219;
+  --state-approved: #38c2cf;
+  --state-done: #4caf50;
+  --state-blocked: #e85959;
 
   --focus: #6da7ec;
 }

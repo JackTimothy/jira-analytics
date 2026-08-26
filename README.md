@@ -160,39 +160,31 @@ carry the whole feature, have no I/O, and are where the tests concentrate.
 
 ### Colour
 
-The seven states are **not** seven independent identities. Five are an ordered
-progression and are encoded as a single-hue ordinal ramp; the two that mean
-"stop and look" use reserved status colours. That is what makes the chart
-colourblind-safe — seven independent hues cannot clear the separation floors at
-once, and the obvious semantic choice, green for done against red for blocked,
-is the single worst pair under deuteranopia.
+Each of the seven states gets its own hue, and the palette is chosen against a
+validated separation floor rather than by eye. Every pair — not only
+neighbouring ones, since any two states can end up side by side on a timeline —
+clears a normal-vision difference of 15 (OKLab ×100). Worst pair 15.9 in light,
+16.3 in dark.
 
-A table view exists alongside the chart, and every state is labelled in the
-legend, so identity never rests on colour alone.
+The first version was a single-hue ordinal ramp: five steps of blue for the
+progression from not-started to merged. It encoded the ordering faithfully and
+failed at the only job the chart has. Five blues a few steps apart are not
+tellable apart in a bar a few pixels wide, and the reader already has the
+ordering — from the legend, and from the shape of the work.
 
-By default the axis shows **working hours to scale and collapses everything
-else**. A two-week sprint is 336 hours of which roughly 100 are working time,
-so a linear axis spends 70% of its width on hours where nothing happens.
-Nights and weekends become fixed narrow bands — recessed, with hairline seams,
-weekends labelled `S·S` — so an off-hours transition still has somewhere to sit
-and still reads as off-hours. The toggle back to linear time exists because a
-compressed axis deliberately understates elapsed time: work sitting over a
-weekend looks like a thin band, not 64 hours.
+Two slots are reserved status colours and keep their meaning across the app:
+amber for feedback outstanding, red for blocked. To Do is the one deliberate
+neutral — nothing has happened yet, and being the only desaturated slot is
+itself a distinction. It is a mid grey rather than a pale one because a sub-task
+sitting in To Do for a week is a finding, not background.
 
-Compression is by the project's configured schedule, never by where the data
-happens to be quiet: a silent stretch in the middle of a working day is the
-most valuable thing a retrospective can show, and collapsing it would hide
-exactly the finding the chart exists to surface.
-
-The schedule is anchored to the local clock across daylight-saving
-transitions — the working span is 08:00–18:00 on the 23-hour day and the
-25-hour day alike, with the off-hours band absorbing the difference.
-
-Segments are clamped to a minimum width and painted widest-first. A state can
-be real and consequential while lasting seconds — an approval moments before
-the merge it unblocked — and at a fortnight per screen that is a hundredth of a
-pixel, drawn under the segment that follows it. Clamping keeps the event
-visible; the tooltip and the table carry its true duration.
+Three checks are knowingly unmet, and `web/src/theme.css` records why. The
+important one: **the palette is not colourblind-safe.** Blue/violet and
+green/red are the two worst pairs under deuteranopia and both are in play.
+Identity is never carried by colour alone — the legend, the tooltips and the
+table view all name the state — but a colourblind-safe palette means giving up
+hue separation somewhere, and that is a deliberate revisit rather than an
+oversight.
 
 ### Which sprints appear
 
