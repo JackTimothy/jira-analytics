@@ -23,13 +23,38 @@ type Retrospective struct {
 	projects ProjectStore
 	tracker  IssueTracker
 	code     CodeHost
+	tracer   Tracer
 }
 
-func NewRetrospective(projects ProjectStore, tracker IssueTracker, code CodeHost) *Retrospective {
-	return &Retrospective{projects: projects, tracker: tracker, code: code}
+// RetrospectiveOption adjusts an interactor at construction. Options rather
+// than constructor parameters because a tracer is optional: nothing about the
+// use case changes when nobody is measuring it.
+type RetrospectiveOption func(*Retrospective)
+
+// WithTracer reports what each build cost.
+func WithTracer(tracer Tracer) RetrospectiveOption {
+	return func(r *Retrospective) {
+		if tracer != nil {
+			r.tracer = tracer
+		}
+	}
+}
+
+func NewRetrospective(projects ProjectStore, tracker IssueTracker, code CodeHost, opts ...RetrospectiveOption) *Retrospective {
+	retrospective := &Retrospective{projects: projects, tracker: tracker, code: code, tracer: noopTracer{}}
+	for _, opt := range opts {
+		opt(retrospective)
+	}
+	return retrospective
 }
 
 func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (domain.Retrospective, error) {
+	trace := r.tracer.Begin("retrospective built", map[string]string{
+		"project": string(req.ProjectID),
+		"sprint":  string(req.SprintID),
+	})
+	defer trace.End()
+
 	project, err := r.projects.Get(ctx, req.ProjectID)
 	if err != nil {
 		return domain.Retrospective{}, err
@@ -40,14 +65,14 @@ func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (do
 		return domain.Retrospective{}, err
 	}
 
-	sprint, err := r.findSprint(ctx, project.Tracker, req.SprintID)
+	sprint, err := r.findSprint(ctx, trace, project.Tracker, req.SprintID)
 	if err != nil {
 		return domain.Retrospective{}, err
 	}
 
-	parents, err := r.tracker.SprintParents(ctx, project.Tracker, sprint.ID)
+	parents, err := r.sprintParents(ctx, trace, project.Tracker, sprint.ID)
 	if err != nil {
-		return domain.Retrospective{}, fmt.Errorf("loading sprint parents: %w", err)
+		return domain.Retrospective{}, err
 	}
 
 	axis := domain.AxisSegments(sprint.Window(), project.Settings.Schedule(), location)
@@ -57,9 +82,9 @@ func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (do
 		return domain.Retrospective{Sprint: sprint, Groups: nil, Axis: axis}, nil
 	}
 
-	subTasks, err := r.tracker.SubTasksOf(ctx, keysOf(parents))
+	subTasks, err := r.subTasksOf(ctx, trace, keysOf(parents))
 	if err != nil {
-		return domain.Retrospective{}, fmt.Errorf("loading sub-tasks: %w", err)
+		return domain.Retrospective{}, err
 	}
 	if len(subTasks) == 0 {
 		return domain.Retrospective{Sprint: sprint, Groups: nil, Axis: axis}, nil
@@ -67,20 +92,66 @@ func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (do
 
 	subTaskKeys := subTaskKeysOf(subTasks)
 
-	history, err := r.tracker.StatusHistory(ctx, subTaskKeys)
+	history, err := r.statusHistory(ctx, trace, subTaskKeys)
 	if err != nil {
-		return domain.Retrospective{}, fmt.Errorf("loading status history: %w", err)
+		return domain.Retrospective{}, err
 	}
 
-	codeEvents, err := r.code.LinkedEvents(ctx, project.Repos, project.Reviewers, subTaskKeys, sprint.Window())
+	codeEvents, err := r.linkedEvents(ctx, trace, project, subTaskKeys, sprint.Window())
 	if err != nil {
-		return domain.Retrospective{}, fmt.Errorf("loading code activity: %w", err)
+		return domain.Retrospective{}, err
 	}
 
 	return r.assemble(sprint, location, project.Settings.Schedule(), parents, subTasks, history, codeEvents), nil
 }
 
-func (r *Retrospective) findSprint(ctx context.Context, tracker domain.TrackerRef, id domain.SprintID) (domain.Sprint, error) {
+// The fetches below are wrapped one method each so every outward call is timed
+// in exactly one place. Without that, a phase silently stops being measured the
+// moment its call site moves.
+
+func (r *Retrospective) sprintParents(ctx context.Context, trace Trace, tracker domain.TrackerRef, sprint domain.SprintID) ([]domain.WorkItem, error) {
+	defer trace.Phase("parents")()
+
+	parents, err := r.tracker.SprintParents(ctx, tracker, sprint)
+	if err != nil {
+		return nil, fmt.Errorf("loading sprint parents: %w", err)
+	}
+	return parents, nil
+}
+
+func (r *Retrospective) subTasksOf(ctx context.Context, trace Trace, parents []domain.IssueKey) ([]domain.SubTask, error) {
+	defer trace.Phase("subtasks")()
+
+	subTasks, err := r.tracker.SubTasksOf(ctx, parents)
+	if err != nil {
+		return nil, fmt.Errorf("loading sub-tasks: %w", err)
+	}
+	return subTasks, nil
+}
+
+func (r *Retrospective) statusHistory(ctx context.Context, trace Trace, keys []domain.IssueKey) (map[domain.IssueKey][]domain.StatusChange, error) {
+	defer trace.Phase("history")()
+
+	history, err := r.tracker.StatusHistory(ctx, keys)
+	if err != nil {
+		return nil, fmt.Errorf("loading status history: %w", err)
+	}
+	return history, nil
+}
+
+func (r *Retrospective) linkedEvents(ctx context.Context, trace Trace, project domain.Project, keys []domain.IssueKey, window domain.Window) (map[domain.IssueKey][]domain.Event, error) {
+	defer trace.Phase("code")()
+
+	events, err := r.code.LinkedEvents(ctx, project.Repos, project.Reviewers, keys, window)
+	if err != nil {
+		return nil, fmt.Errorf("loading code activity: %w", err)
+	}
+	return events, nil
+}
+
+func (r *Retrospective) findSprint(ctx context.Context, trace Trace, tracker domain.TrackerRef, id domain.SprintID) (domain.Sprint, error) {
+	defer trace.Phase("sprint")()
+
 	sprints, err := r.tracker.ListSprints(ctx, tracker)
 	if err != nil {
 		return domain.Sprint{}, fmt.Errorf("listing sprints: %w", err)

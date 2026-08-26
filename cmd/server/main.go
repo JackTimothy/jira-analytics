@@ -15,6 +15,7 @@ import (
 	"github.com/jacktimothy/jira-analytics/internal/adapter/github"
 	"github.com/jacktimothy/jira-analytics/internal/adapter/httpapi"
 	"github.com/jacktimothy/jira-analytics/internal/adapter/jira"
+	"github.com/jacktimothy/jira-analytics/internal/adapter/tracelog"
 	"github.com/jacktimothy/jira-analytics/internal/infra/config"
 	"github.com/jacktimothy/jira-analytics/internal/infra/httpclient"
 	"github.com/jacktimothy/jira-analytics/internal/usecase"
@@ -43,8 +44,10 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	transport := &http.Client{Timeout: 30 * time.Second}
-	client := httpclient.New(transport)
+	client := httpclient.New(&http.Client{
+		Timeout:   30 * time.Second,
+		Transport: apiTransport(),
+	})
 
 	tracker := jira.NewTracker(jira.Config{
 		BaseURL:  settings.JiraBaseURL,
@@ -60,7 +63,8 @@ func run(logger *slog.Logger) error {
 	api := httpapi.NewServer(
 		projects,
 		usecase.NewSprints(projects, tracker),
-		usecase.NewRetrospective(projects, tracker, codeHost),
+		usecase.NewRetrospective(projects, tracker, codeHost,
+			usecase.WithTracer(tracelog.New(logger, tracelog.WithRequestCounter(client.Requests)))),
 		logger,
 	)
 
@@ -71,6 +75,21 @@ func run(logger *slog.Logger) error {
 	}
 
 	return serve(server, logger)
+}
+
+// apiTransport is deliberately not http.DefaultTransport.
+//
+// The default caps idle connections at two per host. Assembling one
+// retrospective fires hundreds of concurrent requests at two hosts, so with the
+// default all but two of them would find no idle connection waiting and pay a
+// fresh TCP and TLS handshake — which costs more than the round trip itself and
+// quietly serialises work that was carefully made parallel.
+func apiTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 32
+	transport.IdleConnTimeout = 90 * time.Second
+	return transport
 }
 
 // serve runs the server until interrupted, then drains in-flight requests.

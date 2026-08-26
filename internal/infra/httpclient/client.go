@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,6 +26,18 @@ type Client struct {
 	doer       Doer
 	maxRetries int
 	sleep      func(context.Context, time.Duration) error
+
+	// requests counts every attempt that reached the network, retries
+	// included. It lives here because this is the one place every outward call
+	// passes through, so a count taken anywhere else would be a guess.
+	requests atomic.Int64
+}
+
+// Requests reports how many attempts this client has made since it was built.
+// It is monotonic and process-wide; callers interested in the cost of one
+// operation should sample it either side and subtract.
+func (c *Client) Requests() int64 {
+	return c.requests.Load()
 }
 
 type Option func(*Client)
@@ -94,6 +107,7 @@ func (c *Client) DoJSON(ctx context.Context, build func() (*http.Request, error)
 		}
 		req = req.WithContext(ctx)
 
+		c.requests.Add(1)
 		resp, err := c.doer.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("%s: %w", req.URL, err)

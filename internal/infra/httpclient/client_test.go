@@ -151,3 +151,45 @@ func TestDoJSONStopsOnCancelledContext(t *testing.T) {
 		t.Fatalf("got %v, want context.Canceled", err)
 	}
 }
+
+func TestRequestsCountsEveryAttemptIncludingRetries(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	client := New(server.Client(), WithSleep(noSleep))
+	if err := client.DoJSON(context.Background(), get(server.URL), nil); err != nil {
+		t.Fatalf("DoJSON: %v", err)
+	}
+
+	// Three attempts, not one call. A counter that hid retries would understate
+	// exactly the cost worth knowing about.
+	if got := client.Requests(); got != 3 {
+		t.Errorf("Requests() = %d, want 3", got)
+	}
+}
+
+func TestRequestsAccumulatesAcrossCalls(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	client := New(server.Client(), WithSleep(noSleep))
+	for i := 0; i < 5; i++ {
+		if err := client.DoJSON(context.Background(), get(server.URL), nil); err != nil {
+			t.Fatalf("DoJSON: %v", err)
+		}
+	}
+
+	if got := client.Requests(); got != 5 {
+		t.Errorf("Requests() = %d, want 5", got)
+	}
+}

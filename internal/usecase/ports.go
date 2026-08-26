@@ -54,3 +54,27 @@ type ProjectStore interface {
 	// tracker or the code host.
 	UpdateSettings(ctx context.Context, id domain.ProjectID, settings domain.ProjectSettings) error
 }
+
+// Tracer observes what a use case cost. It is a port for the same reason the
+// others are: which phases exist is application knowledge, while where the
+// numbers should go — a log line, a metrics backend, nowhere at all — is not.
+//
+// It is deliberately about wall-clock phases rather than counters. The phases
+// of a build overlap once the fetches run concurrently, and a report that shows
+// two phases each taking most of the total is how you see that the overlap is
+// working.
+type Tracer interface {
+	// Begin starts a trace of one operation.
+	Begin(operation string, attrs map[string]string) Trace
+}
+
+// Trace collects the phases of a single operation. Implementations must be
+// safe for concurrent use: phases overlap by design.
+type Trace interface {
+	// Phase starts a named phase and returns the function that ends it, so a
+	// caller can write `defer trace.Phase("history")()`.
+	Phase(name string) func()
+
+	// End closes the trace and reports it.
+	End()
+}
