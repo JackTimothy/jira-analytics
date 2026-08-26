@@ -62,7 +62,7 @@ func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (do
 		return domain.Retrospective{}, fmt.Errorf("loading sub-tasks: %w", err)
 	}
 	if len(subTasks) == 0 {
-		return domain.Retrospective{Sprint: sprint, Groups: emptyGroups(parents, sprint, location), Axis: axis}, nil
+		return domain.Retrospective{Sprint: sprint, Groups: nil, Axis: axis}, nil
 	}
 
 	subTaskKeys := subTaskKeysOf(subTasks)
@@ -145,6 +145,13 @@ func (r *Retrospective) assemble(
 	groups := make([]domain.ParentGroup, 0, len(parents))
 	for _, parent := range parents {
 		timelines := byParent[parent.Key]
+		// A parent with nothing to chart is a header over empty space. That
+		// includes parents whose only sub-tasks were skipped — created after
+		// the sprint closed, say — which is why this filters on the rows that
+		// survived rather than on whether the tracker reported any sub-tasks.
+		if len(timelines) == 0 {
+			continue
+		}
 		sort.SliceStable(timelines, func(i, j int) bool {
 			return timelines[i].SubTask.Key < timelines[j].SubTask.Key
 		})
@@ -198,17 +205,6 @@ func selectScope(parents []domain.WorkItem, sprint domain.Sprint, location *time
 		}
 	}
 	return kept
-}
-
-func emptyGroups(parents []domain.WorkItem, sprint domain.Sprint, location *time.Location) []domain.ParentGroup {
-	groups := make([]domain.ParentGroup, 0, len(parents))
-	for _, parent := range parents {
-		groups = append(groups, domain.ParentGroup{
-			Parent:  parent,
-			InScope: domain.InScope(parent.DueDate, sprint, location),
-		})
-	}
-	return groups
 }
 
 func keysOf(parents []domain.WorkItem) []domain.IssueKey {

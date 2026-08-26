@@ -246,7 +246,7 @@ func TestBuildRejectsAnInvalidProjectTimezone(t *testing.T) {
 	}
 }
 
-func TestBuildKeepsParentsWithNoSubTasks(t *testing.T) {
+func TestBuildExcludesParentsWithNothingToChart(t *testing.T) {
 	projects, tracker, code := buildFixture()
 	tracker.subTasks = nil
 
@@ -255,11 +255,60 @@ func TestBuildKeepsParentsWithNoSubTasks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if len(result.Groups) != 2 {
-		t.Fatalf("got %d groups, want 2 parents even with no sub-tasks", len(result.Groups))
+	if len(result.Groups) != 0 {
+		t.Fatalf("got %d groups, want none — a parent with no rows is a header over empty space", len(result.Groups))
 	}
-	if len(result.Groups[0].SubTasks) != 0 {
-		t.Error("expected no sub-task rows")
+	// The frame still comes back so the chart can render its axis.
+	if len(result.Axis) == 0 {
+		t.Error("expected the axis even with nothing to chart")
+	}
+}
+
+func TestBuildKeepsParentsThatDoHaveRows(t *testing.T) {
+	projects, tracker, code := buildFixture()
+	// PROJ-2 keeps its sub-task; PROJ-1 loses both of its.
+	tracker.subTasks = []domain.SubTask{
+		{Key: "PROJ-20", ParentKey: "PROJ-2", Summary: "Spike", Created: ts(4, 9), Status: statusToDo},
+	}
+
+	result, err := NewRetrospective(projects, tracker, code).
+		Build(context.Background(), RetrospectiveRequest{ProjectID: "activation", SprintID: "100", Scope: domain.ScopeAll})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(result.Groups) != 1 {
+		t.Fatalf("got %d groups, want only the parent with rows", len(result.Groups))
+	}
+	if result.Groups[0].Parent.Key != "PROJ-2" {
+		t.Errorf("kept %s, want PROJ-2", result.Groups[0].Parent.Key)
+	}
+}
+
+func TestBuildExcludesAParentWhoseOnlySubTaskWasSkipped(t *testing.T) {
+	// A sub-task created after the sprint closed produces no timeline, so its
+	// parent has nothing to chart even though the tracker reported a sub-task.
+	projects, tracker, code := buildFixture()
+	tracker.subTasks = []domain.SubTask{
+		{Key: "PROJ-99", ParentKey: "PROJ-1", Summary: "Late", Created: ts(25, 9), Status: statusToDo},
+	}
+
+	result, err := NewRetrospective(projects, tracker, code).
+		Build(context.Background(), RetrospectiveRequest{ProjectID: "activation", SprintID: "100", Scope: domain.ScopeAll})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(result.Groups) != 0 {
+		t.Fatalf("got %d groups, want none", len(result.Groups))
+	}
+	// The warning still stands: the reader should know why it is absent.
+	var warned bool
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning, "PROJ-99") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("expected a warning explaining the omission, got %v", result.Warnings)
 	}
 }
 

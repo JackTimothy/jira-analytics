@@ -11,7 +11,9 @@ company's tracker, repositories or people appears in this repository.
 
 For a chosen sprint, every sub-task gets a row showing the states it occupied
 over time, grouped by parent work item, with a toggle between all sub-tasks in
-the sprint and only those in the committed scope.
+the sprint and only those in the committed scope. A parent with no rows to show
+is left out entirely — a header over empty space says nothing about how the
+sprint went.
 
 ### The seven states
 

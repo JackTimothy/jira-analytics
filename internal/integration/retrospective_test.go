@@ -51,6 +51,7 @@ var jiraRoutes = map[string]string{
 		{"created":"2026-08-04T09:00:00.000-0400","items":[
 			{"field":"status","from":"10039","fromString":"To Do","to":"3","toString":"In Progress"}]}]}`,
 	"/rest/api/3/issue/PROJ-20/changelog": `{"isLast":true,"values":[]}`,
+	"/rest/api/3/issue/PROJ-30/changelog": `{"isLast":true,"values":[]}`,
 }
 
 // The three JQL queries share one endpoint, so the fake routes on the query
@@ -69,7 +70,10 @@ const sprintParentsResponse = `{"issues":[
 	 "status":{"id":"3","name":"In Progress","statusCategory":{"key":"indeterminate"}}}},
 	{"key":"PROJ-3","fields":{"summary":"Carried over","duedate":"2026-08-03",
 	 "created":"2026-07-10T09:00:00.000-0400","issuetype":{"subtask":false},
-	 "status":{"id":"3","name":"In Progress","statusCategory":{"key":"indeterminate"}}}}]}`
+	 "status":{"id":"3","name":"In Progress","statusCategory":{"key":"indeterminate"}}}},
+	{"key":"PROJ-4","fields":{"summary":"Committed but never broken down","duedate":"2026-08-17",
+	 "created":"2026-07-10T09:00:00.000-0400","issuetype":{"subtask":false},
+	 "status":{"id":"10039","name":"To Do","statusCategory":{"key":"new"}}}}]}`
 
 const subTasksResponse = `{"issues":[
 	{"key":"PROJ-10","fields":{"summary":"Build the API","created":"2026-07-28T09:00:00.000-0400",
@@ -80,7 +84,10 @@ const subTasksResponse = `{"issues":[
 	 "status":{"id":"10009","name":"Review","statusCategory":{"key":"indeterminate"}}}},
 	{"key":"PROJ-20","fields":{"summary":"No code needed","created":"2026-08-05T09:00:00.000-0400",
 	 "issuetype":{"subtask":true},"parent":{"key":"PROJ-2"},
-	 "status":{"id":"10039","name":"To Do","statusCategory":{"key":"new"}}}}]}`
+	 "status":{"id":"10039","name":"To Do","statusCategory":{"key":"new"}}}},
+	{"key":"PROJ-30","fields":{"summary":"Carryover work","created":"2026-07-20T09:00:00.000-0400",
+	 "issuetype":{"subtask":true},"parent":{"key":"PROJ-3"},
+	 "status":{"id":"10024","name":"Done","statusCategory":{"key":"done"}}}}]}`
 
 func routeJQL(body []byte) (string, bool) {
 	var request struct {
@@ -259,7 +266,15 @@ func TestRetrospectiveEndToEnd(t *testing.T) {
 		t.Fatalf("sprint = %+v", body.Sprint)
 	}
 	if len(body.Parents) != 3 {
-		t.Fatalf("got %d parents, want 3", len(body.Parents))
+		t.Fatalf("got %d parents, want 3 — PROJ-4 has no sub-tasks and is excluded", len(body.Parents))
+	}
+	for _, parent := range body.Parents {
+		if parent.Key == "PROJ-4" {
+			t.Error("a parent with no sub-tasks reached the response")
+		}
+		if len(parent.SubTasks) == 0 {
+			t.Errorf("%s was included with no rows to chart", parent.Key)
+		}
 	}
 
 	scope := map[string]bool{}
