@@ -14,6 +14,7 @@ import (
 
 	"github.com/jacktimothy/jira-analytics/internal/domain"
 	"github.com/jacktimothy/jira-analytics/internal/infra/httpclient"
+	"github.com/jacktimothy/jira-analytics/internal/infra/parallel"
 )
 
 // Config carries deployment-specific connection details.
@@ -123,7 +124,7 @@ func (c *CodeHost) LinkedEvents(
 			}
 		}
 
-		if err := forEachBounded(ctx, pulls, maxConcurrency, func(ctx context.Context, match pullMatch) error {
+		if err := parallel.ForEach(ctx, pulls, maxConcurrency, func(ctx context.Context, match pullMatch) error {
 			events, err := c.eventsForPullRequest(ctx, repo, match.pull, policy)
 			if err != nil {
 				return err
@@ -134,7 +135,7 @@ func (c *CodeHost) LinkedEvents(
 			return nil, err
 		}
 
-		if err := forEachBounded(ctx, orphans, maxConcurrency, func(ctx context.Context, match branchMatch) error {
+		if err := parallel.ForEach(ctx, orphans, maxConcurrency, func(ctx context.Context, match branchMatch) error {
 			firstSeen, err := c.branchFirstSeen(ctx, repo, match.name)
 			if err != nil {
 				return err

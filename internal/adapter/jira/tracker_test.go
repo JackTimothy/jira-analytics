@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,12 +21,12 @@ import (
 // routes maps a request path to the JSON the fake Jira returns. The fixtures
 // are trimmed from real Jira Cloud responses, so field names and the timestamp
 // format are the ones the adapter must actually cope with.
-func newFakeJira(t *testing.T, routes map[string]string) (*Tracker, *[]string) {
+func newFakeJira(t *testing.T, routes map[string]string) (*Tracker, *requestLog) {
 	t.Helper()
-	var seen []string
+	seen := &requestLog{}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen = append(seen, r.Method+" "+r.URL.Path)
+		seen.record(r.Method + " " + r.URL.Path)
 
 		if user, pass, ok := r.BasicAuth(); !ok || user != "someone@example.com" || pass != "token" {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -44,7 +46,40 @@ func newFakeJira(t *testing.T, routes map[string]string) (*Tracker, *[]string) {
 		Config{BaseURL: server.URL, Email: "someone@example.com", APIToken: "token"},
 		httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })),
 	)
-	return tracker, &seen
+	return tracker, seen
+}
+
+// requestLog records what the fake was asked for. It is mutex-guarded because
+// the adapter now fetches changelogs concurrently, and an unsynchronised slice
+// here would make the harness itself the source of a data race — the last place
+// anyone would look for one.
+type requestLog struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (l *requestLog) record(call string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls = append(l.calls, call)
+}
+
+// snapshot returns a copy, so a caller can range over it while nothing else is
+// in flight without holding the lock through the loop.
+func (l *requestLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.calls...)
+}
+
+func (l *requestLog) count(call string) int {
+	n := 0
+	for _, seen := range l.snapshot() {
+		if seen == call {
+			n++
+		}
+	}
+	return n
 }
 
 const fieldsFixture = `[
@@ -105,7 +140,7 @@ func TestListSprintsNeverConsultsABoard(t *testing.T) {
 	if _, err := tracker.ListSprints(context.Background(), domain.TrackerRef{ProjectKey: "PROJ"}); err != nil {
 		t.Fatalf("ListSprints: %v", err)
 	}
-	for _, call := range *seen {
+	for _, call := range seen.snapshot() {
 		if strings.Contains(call, "/board/") {
 			t.Errorf("consulted a board: %s", call)
 		}
@@ -125,7 +160,7 @@ func TestListSprintsCachesTheScan(t *testing.T) {
 	}
 
 	var searches int
-	for _, call := range *seen {
+	for _, call := range seen.snapshot() {
 		if strings.Contains(call, "/search/jql") {
 			searches++
 		}
@@ -224,8 +259,8 @@ func TestSubTasksOfSkipsTheCallWhenThereAreNoParents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubTasksOf: %v", err)
 	}
-	if len(subTasks) != 0 || len(*seen) != 0 {
-		t.Errorf("expected no request and no results, got %d requests", len(*seen))
+	if len(subTasks) != 0 || len(seen.snapshot()) != 0 {
+		t.Errorf("expected no request and no results, got %d requests", len(seen.snapshot()))
 	}
 }
 
@@ -296,7 +331,7 @@ func TestStatusHistoryFetchesStatusDefinitionsOnlyOnce(t *testing.T) {
 	}
 
 	var statusCalls int
-	for _, call := range *seen {
+	for _, call := range seen.snapshot() {
 		if call == "GET /rest/api/3/status" {
 			statusCalls++
 		}
@@ -394,5 +429,109 @@ func TestChangelogPagingAdvancesByWhatTheServerReturned(t *testing.T) {
 		if offsets[i] != want[i] {
 			t.Fatalf("requested offsets %v, want %v", offsets, want)
 		}
+	}
+}
+
+// The changelog fan-out is where a wrong index would be most damaging: every
+// issue would get a plausible history belonging to a different issue, and the
+// chart would look entirely normal. Each fixture below transitions to a status
+// named after its own key, so any mix-up is visible rather than merely wrong.
+func TestStatusHistoryKeepsEachIssuesChangelogWithThatIssue(t *testing.T) {
+	const issues = 24
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/api/3/status" {
+			io.WriteString(w, `[]`)
+			return
+		}
+		key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/rest/api/3/issue/"), "/changelog")
+		fmt.Fprintf(w, `{"isLast": true, "values": [
+		  {"created": "2026-08-13T09:00:00.000+0000",
+		   "items": [{"field": "status", "fromString": "To Do", "toString": %q}]}]}`, "status-for-"+key)
+	}))
+	t.Cleanup(server.Close)
+
+	tracker := NewTracker(
+		Config{BaseURL: server.URL, Email: "someone@example.com", APIToken: "token"},
+		httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })),
+	)
+
+	keys := make([]domain.IssueKey, 0, issues)
+	for i := 1; i <= issues; i++ {
+		keys = append(keys, domain.IssueKey("PROJ-"+strconv.Itoa(i)))
+	}
+
+	history, err := tracker.StatusHistory(context.Background(), keys)
+	if err != nil {
+		t.Fatalf("StatusHistory: %v", err)
+	}
+	if len(history) != issues {
+		t.Fatalf("got %d histories, want %d", len(history), issues)
+	}
+	for _, key := range keys {
+		changes := history[key]
+		if len(changes) != 1 {
+			t.Fatalf("%s: got %d changes, want 1", key, len(changes))
+		}
+		if want := "status-for-" + string(key); changes[0].To.Name != want {
+			t.Errorf("%s carries %q — a changelog belonging to another issue", key, changes[0].To.Name)
+		}
+	}
+}
+
+// Proves the fan-out is real rather than a serial loop wearing a concurrent
+// shape. Each request blocks until enough of them have arrived together; run
+// serially, none is ever released and the barrier times out.
+func TestStatusHistoryFetchesChangelogsConcurrently(t *testing.T) {
+	const barrier = 4
+
+	var inFlight, peak atomic.Int32
+	release := make(chan struct{})
+	var once sync.Once
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/api/3/status" {
+			io.WriteString(w, `[]`)
+			return
+		}
+
+		now := inFlight.Add(1)
+		for {
+			high := peak.Load()
+			if now <= high || peak.CompareAndSwap(high, now) {
+				break
+			}
+		}
+		if now >= barrier {
+			once.Do(func() { close(release) })
+		}
+		select {
+		case <-release:
+		case <-time.After(2 * time.Second):
+		}
+		inFlight.Add(-1)
+
+		io.WriteString(w, `{"isLast": true, "values": []}`)
+	}))
+	t.Cleanup(server.Close)
+
+	tracker := NewTracker(
+		Config{BaseURL: server.URL, Email: "someone@example.com", APIToken: "token"},
+		httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })),
+	)
+
+	keys := make([]domain.IssueKey, 0, 16)
+	for i := 1; i <= 16; i++ {
+		keys = append(keys, domain.IssueKey("PROJ-"+strconv.Itoa(i)))
+	}
+
+	if _, err := tracker.StatusHistory(context.Background(), keys); err != nil {
+		t.Fatalf("StatusHistory: %v", err)
+	}
+	if peak.Load() < barrier {
+		t.Errorf("peak concurrency was %d, want at least %d — the fetches ran serially", peak.Load(), barrier)
+	}
+	if peak.Load() > maxConcurrency {
+		t.Errorf("peak concurrency was %d, want at most %d", peak.Load(), maxConcurrency)
 	}
 }

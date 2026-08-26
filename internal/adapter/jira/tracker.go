@@ -16,6 +16,7 @@ import (
 
 	"github.com/jacktimothy/jira-analytics/internal/domain"
 	"github.com/jacktimothy/jira-analytics/internal/infra/httpclient"
+	"github.com/jacktimothy/jira-analytics/internal/infra/parallel"
 )
 
 // Config carries the deployment-specific connection details. None of these
@@ -63,6 +64,12 @@ func NewTracker(config Config, client *httpclient.Client) *Tracker {
 
 // pageSize is Jira's practical maximum for these endpoints.
 const pageSize = 100
+
+// maxConcurrency bounds in-flight requests to Jira. One retrospective asks for
+// a changelog per sub-task, and those requests have nothing to do with each
+// other — but Jira rate limits by burst, and the resulting backoff costs more
+// than the concurrency saves.
+const maxConcurrency = 8
 
 func (t *Tracker) request(method, path string, query url.Values, body any) func() (*http.Request, error) {
 	return func() (*http.Request, error) {
@@ -396,14 +403,21 @@ func (t *Tracker) StatusHistory(ctx context.Context, keys []domain.IssueKey) (ma
 		return nil, err
 	}
 
+	// One request per issue, but concurrently: nothing about one issue's
+	// changelog depends on another's, and serially this was the single largest
+	// block of wall-clock time in a build.
+	changelogs, err := parallel.Map(ctx, keys, maxConcurrency,
+		func(ctx context.Context, key domain.IssueKey) ([]domain.StatusChange, error) {
+			return t.changelogFor(ctx, key, statuses)
+		})
+	if err != nil {
+		return nil, err
+	}
+
 	history := make(map[domain.IssueKey][]domain.StatusChange, len(keys))
-	for _, key := range keys {
-		changes, err := t.changelogFor(ctx, key, statuses)
-		if err != nil {
-			return nil, err
-		}
+	for i, changes := range changelogs {
 		if len(changes) > 0 {
-			history[key] = changes
+			history[keys[i]] = changes
 		}
 	}
 	return history, nil

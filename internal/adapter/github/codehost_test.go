@@ -71,12 +71,12 @@ var fixtures = map[string]string{
 	"/repos/org/repo/pulls/9/commits": `[{"commit":{"committer":{"date":"2026-08-04T13:00:00Z"}}}]`,
 }
 
-func newFakeGitHub(t *testing.T) (*CodeHost, *[]string) {
+func newFakeGitHub(t *testing.T) (*CodeHost, *requestLog) {
 	t.Helper()
-	var seen []string
+	seen := &requestLog{}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen = append(seen, r.URL.Path)
+		seen.record(r.URL.Path)
 
 		if r.Header.Get("Authorization") != "Bearer test-token" {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -106,7 +106,30 @@ func newFakeGitHub(t *testing.T) (*CodeHost, *[]string) {
 		Config{BaseURL: server.URL, Token: "test-token"},
 		httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })),
 	)
-	return host, &seen
+	return host, seen
+}
+
+// requestLog records what the fake was asked for. It is mutex-guarded because
+// this adapter fans out across pull requests, so an unsynchronised slice here
+// would make the harness itself the source of a data race — the last place
+// anyone would look for one.
+type requestLog struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (l *requestLog) record(call string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls = append(l.calls, call)
+}
+
+// snapshot returns a copy, so a caller can range over it while nothing else is
+// in flight without holding the lock through the loop.
+func (l *requestLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.calls...)
 }
 
 func TestLinkedEventsBuildsATimelineFromBranchesPullsAndReviews(t *testing.T) {
@@ -166,7 +189,7 @@ func TestLinkedEventsIgnoresBranchesWithNoRequestedKey(t *testing.T) {
 	if _, ok := result["PROJ-11"]; ok {
 		t.Error("PROJ-11 was not requested but appeared in the result")
 	}
-	for _, path := range *seen {
+	for _, path := range seen.snapshot() {
 		if path == "/repos/org/repo/compare/dev...dependabot/npm/react-19" {
 			t.Error("a branch with no issue key was investigated")
 		}
@@ -200,7 +223,7 @@ func TestLinkedEventsReadsTheDefaultBranchOncePerRepo(t *testing.T) {
 	}
 
 	var repoCalls int
-	for _, path := range *seen {
+	for _, path := range seen.snapshot() {
 		if path == "/repos/org/repo" {
 			repoCalls++
 		}
@@ -219,8 +242,8 @@ func TestLinkedEventsSkipsWorkWhenThereIsNothingToLink(t *testing.T) {
 	if _, err := host.LinkedEvents(context.Background(), nil, domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10"}, testGitHubWindow); err != nil {
 		t.Fatalf("LinkedEvents: %v", err)
 	}
-	if len(*seen) != 0 {
-		t.Errorf("made %d requests with nothing to do", len(*seen))
+	if len(seen.snapshot()) != 0 {
+		t.Errorf("made %d requests with nothing to do", len(seen.snapshot()))
 	}
 }
 
@@ -238,46 +261,6 @@ func TestLinkedEventsReportsFailures(t *testing.T) {
 		domain.ReviewerPolicy{}, []domain.IssueKey{"PROJ-10"}, testGitHubWindow)
 	if err == nil {
 		t.Fatal("expected an error rather than a silently empty result")
-	}
-}
-
-func TestForEachBoundedRespectsTheLimit(t *testing.T) {
-	items := make([]int, 50)
-	var mu sync.Mutex
-	var running, peak int
-
-	err := forEachBounded(context.Background(), items, 4, func(context.Context, int) error {
-		mu.Lock()
-		running++
-		if running > peak {
-			peak = running
-		}
-		mu.Unlock()
-
-		time.Sleep(time.Millisecond)
-
-		mu.Lock()
-		running--
-		mu.Unlock()
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("forEachBounded: %v", err)
-	}
-	if peak > 4 {
-		t.Errorf("peak concurrency was %d, want at most 4", peak)
-	}
-}
-
-func TestForEachBoundedReturnsTheFirstError(t *testing.T) {
-	err := forEachBounded(context.Background(), []int{1, 2, 3}, 2, func(_ context.Context, i int) error {
-		if i == 2 {
-			return errBoom
-		}
-		return nil
-	})
-	if err != errBoom {
-		t.Errorf("got %v, want errBoom", err)
 	}
 }
 
@@ -318,7 +301,7 @@ func TestMatchingBranchesRejectsRawPrefixFalsePositives(t *testing.T) {
 	if len(result) != 2 {
 		t.Errorf("got %d linked issues, want 2: %v", len(result), keysOf(result))
 	}
-	for _, path := range *seen {
+	for _, path := range seen.snapshot() {
 		if strings.Contains(path, "PROJ-110") {
 			t.Errorf("investigated a branch nobody asked about: %s", path)
 		}
@@ -334,7 +317,7 @@ func TestMatchingBranchesQueriesOncePerProjectPrefixNotOncePerIssue(t *testing.T
 	}
 
 	var refQueries int
-	for _, path := range *seen {
+	for _, path := range seen.snapshot() {
 		if strings.Contains(path, "/git/matching-refs/") {
 			refQueries++
 		}
