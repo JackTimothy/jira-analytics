@@ -40,6 +40,14 @@ type CodeHost struct {
 
 	defaultBranchMu sync.Mutex
 	defaultBranches map[string]string
+
+	// GitHub bills GraphQL by computed node cost rather than by request, so a
+	// request count says nothing about how close the hourly budget is to
+	// running out. These track what the server reports back.
+	rateLimitMu      sync.Mutex
+	graphQLCost      int
+	graphQLRemaining int
+	graphQLResetAt   time.Time
 }
 
 func NewCodeHost(config Config, client *httpclient.Client) *CodeHost {
@@ -156,14 +164,7 @@ func (c *CodeHost) eventsInRepo(
 		}
 	}
 
-	if err := parallel.ForEach(ctx, pulls, maxConcurrency, func(ctx context.Context, match pullMatch) error {
-		events, err := c.eventsForPullRequest(ctx, repo, match.pull, policy)
-		if err != nil {
-			return err
-		}
-		record(match.key, events)
-		return nil
-	}); err != nil {
+	if err := c.recordPullEvents(ctx, repo, pulls, policy, record); err != nil {
 		return err
 	}
 
@@ -443,6 +444,117 @@ func (c *CodeHost) defaultBranch(ctx context.Context, repo domain.RepoRef) (stri
 	}
 	c.defaultBranches[repo.String()] = details.DefaultBranch
 	return details.DefaultBranch, nil
+}
+
+// recordPullEvents turns every matched pull request into events.
+//
+// The detail each one needs — its timeline, its reviews and its first commit —
+// is three REST requests, and a sprint's worth of pull requests is a hundred-odd
+// round trips that concurrency alone cannot flatten. One GraphQL query answers
+// ten pull requests at once, so the batches below replace almost all of them.
+func (c *CodeHost) recordPullEvents(
+	ctx context.Context,
+	repo domain.RepoRef,
+	pulls []pullMatch,
+	policy domain.ReviewerPolicy,
+	record func(domain.IssueKey, []domain.Event),
+) error {
+	if len(pulls) == 0 {
+		return nil
+	}
+
+	byNumber := make(map[int]pullMatch, len(pulls))
+	numbers := make([]int, 0, len(pulls))
+	for _, match := range pulls {
+		if _, already := byNumber[match.pull.Number]; already {
+			continue
+		}
+		byNumber[match.pull.Number] = match
+		numbers = append(numbers, match.pull.Number)
+	}
+	sort.Ints(numbers)
+
+	var mu sync.Mutex
+	var needREST []pullMatch
+	queued := map[int]struct{}{}
+
+	err := parallel.ForEach(ctx, batchNumbers(numbers, graphQLBatchSize), maxConcurrency,
+		func(ctx context.Context, batch []int) error {
+			details, truncated, err := c.pullDetails(ctx, repo, batch)
+			if err != nil {
+				return err
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			// A truncated pull request is also absent from details, so it would
+			// otherwise be queued twice and have its events recorded twice —
+			// which puts a second PROpened after the merge and leaves the
+			// timeline oscillating, the same failure the listing dedupe exists
+			// to prevent.
+			enqueue := func(number int) {
+				if _, already := queued[number]; already {
+					return
+				}
+				queued[number] = struct{}{}
+				needREST = append(needREST, byNumber[number])
+			}
+
+			for _, number := range truncated {
+				enqueue(number)
+			}
+			for _, number := range batch {
+				detail, ok := details[number]
+				if !ok {
+					// Neither returned nor reported truncated. Refetching is
+					// the safe reading: a pull request silently missing from
+					// the answer would otherwise be charted as never reviewed.
+					enqueue(number)
+					continue
+				}
+				record(byNumber[number].key, eventsFromDetail(repo, byNumber[number].pull, detail, policy))
+			}
+			return nil
+		})
+	if err != nil {
+		return err
+	}
+
+	// Whatever the batch could not answer for, ask the way it used to be asked.
+	// On a healthy repository this is empty.
+	sort.Slice(needREST, func(i, j int) bool { return needREST[i].pull.Number < needREST[j].pull.Number })
+	return parallel.ForEach(ctx, needREST, maxConcurrency, func(ctx context.Context, match pullMatch) error {
+		events, err := c.eventsForPullRequest(ctx, repo, match.pull, policy)
+		if err != nil {
+			return err
+		}
+		record(match.key, events)
+		return nil
+	})
+}
+
+// eventsFromDetail assembles the same events the REST path assembles, from the
+// same translation functions. The only difference between the two paths is how
+// the bytes arrived.
+func eventsFromDetail(repo domain.RepoRef, pull pullJSON, detail pullDetail, policy domain.ReviewerPolicy) []domain.Event {
+	key := domain.PRKey{Repo: repo.String(), Number: pull.Number}
+
+	events := []domain.Event{}
+	if !detail.FirstCommit.IsZero() {
+		events = append(events, domain.BranchFirstSeen{
+			At:   detail.FirstCommit,
+			Name: repo.String() + ":" + pull.Head.Ref,
+		})
+	}
+	events = append(events, domain.PROpened{
+		At:    pull.CreatedAt,
+		PR:    key,
+		Draft: draftAtCreation(pull, detail.Timeline),
+	})
+	events = append(events, timelineEvents(key, detail.Timeline, policy)...)
+	events = append(events, reviewEvents(key, detail.Reviews, policy)...)
+	return events
 }
 
 func (c *CodeHost) eventsForPullRequest(

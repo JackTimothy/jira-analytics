@@ -75,11 +75,23 @@ var fixtures = map[string]string{
 }
 
 func newFakeGitHub(t *testing.T) (*CodeHost, *requestLog) {
+	return fakeGitHubIn(t, graphQLNormal)
+}
+
+// fakeGitHubIn serves both transports from one fixture set. The mode decides
+// how the GraphQL half misbehaves, so every fallback the adapter has is
+// exercised against the same assertions rather than only described.
+func fakeGitHubIn(t *testing.T, mode graphQLMode) (*CodeHost, *requestLog) {
 	t.Helper()
 	seen := &requestLog{}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen.record(r.URL.Path)
+
+		if r.URL.Path == "/graphql" {
+			serveGraphQL(w, r, mode)
+			return
+		}
 
 		if r.Header.Get("Authorization") != "Bearer test-token" {
 			w.WriteHeader(http.StatusUnauthorized)
@@ -367,6 +379,16 @@ func TestLinkedEventsFindsMergedWorkAfterItsBranchIsDeleted(t *testing.T) {
 				"merged_at":"2026-08-10T09:00:00Z",
 				"head":{"ref":"OTCO-5854-Update-Balance-of-Plant-shared-routes"}}]`)
 
+		case r.URL.Path == "/graphql":
+			// This test is about finding the pull request at all after its
+			// branch is gone, not about how its detail is fetched. Reporting
+			// truncation sends the adapter down the REST path deliberately,
+			// which is where this test's fixtures live.
+			io.WriteString(w, `{"data":{"repository":{"p0":{"number":4683,
+				"commits":{"totalCount":1,"nodes":[]},
+				"reviews":{"totalCount":99,"nodes":[]},
+				"timelineItems":{"totalCount":99,"nodes":[]}}}}}`)
+
 		case r.URL.Path == "/repos/org/repo/pulls/4683/commits":
 			io.WriteString(w, `[{"commit":{"committer":{"date":"2026-08-04T13:00:00Z"}}}]`)
 
@@ -651,5 +673,150 @@ func TestEventsForPullRequestReadsItsThreeEndpointsConcurrently(t *testing.T) {
 	}
 	if peak.Load() < endpoints {
 		t.Errorf("peak concurrency was %d, want %d — the three reads still run in sequence", peak.Load(), endpoints)
+	}
+}
+
+// linkedEventsIn runs the standard fixture through whichever transport the mode
+// selects, and returns the events it produced.
+func linkedEventsIn(t *testing.T, mode graphQLMode) map[domain.IssueKey][]domain.Event {
+	t.Helper()
+	host, _ := fakeGitHubIn(t, mode)
+
+	events, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
+		domain.ReviewerPolicy{ExcludeBots: true},
+		[]domain.IssueKey{"PROJ-10", "PROJ-11"}, testGitHubWindow)
+	if err != nil {
+		t.Fatalf("LinkedEvents: %v", err)
+	}
+	return events
+}
+
+// The whole claim of the GraphQL path is that it produces exactly what the REST
+// path produced. Identical, not similar: both transports read the same fixtures,
+// so any difference in the events is a difference in the adapter.
+//
+// graphQLAlwaysTruncated forces every pull request down the REST fallback, which
+// makes this one test cover both the parity claim and the fallback itself.
+func TestBothTransportsProduceIdenticalEvents(t *testing.T) {
+	viaGraphQL := linkedEventsIn(t, graphQLNormal)
+	viaREST := linkedEventsIn(t, graphQLAlwaysTruncated)
+
+	if len(viaGraphQL) != len(viaREST) {
+		t.Fatalf("GraphQL produced events for %d keys, REST for %d", len(viaGraphQL), len(viaREST))
+	}
+	for key, graphEvents := range viaGraphQL {
+		restEvents, ok := viaREST[key]
+		if !ok {
+			t.Fatalf("%s has events over GraphQL but none over REST", key)
+		}
+		if len(graphEvents) != len(restEvents) {
+			t.Fatalf("%s: %d events over GraphQL, %d over REST\n graphql=%+v\n rest=%+v",
+				key, len(graphEvents), len(restEvents), graphEvents, restEvents)
+		}
+		// Events are recorded in the order the adapter builds them, which is
+		// itself part of what must not change.
+		for i := range graphEvents {
+			if fmt.Sprintf("%T%+v", graphEvents[i], graphEvents[i]) !=
+				fmt.Sprintf("%T%+v", restEvents[i], restEvents[i]) {
+				t.Errorf("%s event %d differs:\n graphql=%T%+v\n rest=%T%+v",
+					key, i, graphEvents[i], graphEvents[i], restEvents[i], restEvents[i])
+			}
+		}
+	}
+}
+
+// Ten pull requests in one query rather than three requests each.
+func TestPullDetailIsBatchedRatherThanFetchedPerPullRequest(t *testing.T) {
+	host, seen := fakeGitHubIn(t, graphQLNormal)
+	if _, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
+		domain.ReviewerPolicy{ExcludeBots: true},
+		[]domain.IssueKey{"PROJ-10", "PROJ-11"}, testGitHubWindow); err != nil {
+		t.Fatalf("LinkedEvents: %v", err)
+	}
+
+	calls := seen.snapshot()
+	graphQL := 0
+	for _, path := range calls {
+		switch {
+		case path == "/graphql":
+			graphQL++
+		case strings.HasSuffix(path, "/timeline"),
+			strings.HasSuffix(path, "/reviews"),
+			strings.HasSuffix(path, "/commits"):
+			t.Errorf("fetched %s per pull request despite the batch answering", path)
+		}
+	}
+	if graphQL != 1 {
+		t.Errorf("made %d GraphQL queries for two pull requests, want 1", graphQL)
+	}
+}
+
+// GraphQL reports failure as a 200 carrying data and errors together, which the
+// HTTP client cannot see. Charting half a sprint's review history as if that
+// were all of it is the worst outcome available here.
+func TestPartialGraphQLFailureIsAnErrorRatherThanAHalfBuiltTimeline(t *testing.T) {
+	host, _ := fakeGitHubIn(t, graphQLPartialFailure)
+
+	_, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
+		domain.ReviewerPolicy{ExcludeBots: true},
+		[]domain.IssueKey{"PROJ-10", "PROJ-11"}, testGitHubWindow)
+	if err == nil {
+		t.Fatal("a 200 carrying an errors array was treated as success")
+	}
+	if !strings.Contains(err.Error(), "RATE_LIMITED") {
+		t.Errorf("error does not say what went wrong: %v", err)
+	}
+}
+
+// A pull request missing from the answer with no truncation flag and no error
+// must be refetched, not charted as though nothing ever happened to it.
+func TestAPullRequestMissingFromTheBatchIsRefetchedRatherThanBelieved(t *testing.T) {
+	host, seen := fakeGitHubIn(t, graphQLOmitsAPull)
+
+	events, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
+		domain.ReviewerPolicy{ExcludeBots: true},
+		[]domain.IssueKey{"PROJ-10", "PROJ-11"}, testGitHubWindow)
+	if err != nil {
+		t.Fatalf("LinkedEvents: %v", err)
+	}
+
+	refetched := false
+	for _, path := range seen.snapshot() {
+		if strings.HasSuffix(path, "/timeline") {
+			refetched = true
+		}
+	}
+	if !refetched {
+		t.Error("the silently absent pull request was never refetched")
+	}
+	if len(events) == 0 {
+		t.Error("no events at all after the refetch")
+	}
+}
+
+func TestGraphQLEndpointHandlesEnterpriseAndDotCom(t *testing.T) {
+	cases := map[string]string{
+		"https://api.github.com":          "https://api.github.com/graphql",
+		"https://api.github.com/":         "https://api.github.com/graphql",
+		"https://ghe.example.com/api/v3":  "https://ghe.example.com/api/graphql",
+		"https://ghe.example.com/api/v3/": "https://ghe.example.com/api/graphql",
+		"http://127.0.0.1:8080":           "http://127.0.0.1:8080/graphql",
+	}
+	for base, want := range cases {
+		// Enterprise serves GraphQL as a sibling of the REST root, not a child
+		// of it, which a naive suffix would get wrong.
+		if got := GraphQLEndpoint(base); got != want {
+			t.Errorf("GraphQLEndpoint(%q) = %q, want %q", base, got, want)
+		}
+	}
+}
+
+func TestBatchNumbersSplitsEvenlyAndKeepsTheRemainder(t *testing.T) {
+	batches := batchNumbers([]int{1, 2, 3, 4, 5, 6, 7}, 3)
+	if len(batches) != 3 {
+		t.Fatalf("got %d batches, want 3", len(batches))
+	}
+	if len(batches[2]) != 1 || batches[2][0] != 7 {
+		t.Errorf("remainder batch = %v, want [7]", batches[2])
 	}
 }

@@ -219,9 +219,21 @@ would be worse than useless.
 
 Assembling a retrospective is almost entirely round trips; the replay itself is
 microseconds. So the adapters overlap everything that can overlap — the tracker
-and the code host, the repositories, the pages of a listing, the three reads of
-each pull request — under a concurrency bound, because both hosts punish bursts
-with backoff that costs more than the parallelism saves.
+and the code host, the repositories, the pages of a listing — under a
+concurrency bound, because both hosts punish bursts with backoff that costs more
+than the parallelism saves. Where overlapping is not enough, the work is batched
+instead: a sprint's status history is one search rather than a request per
+sub-task, and pull request detail is one GraphQL query per ten rather than three
+requests each.
+
+The pull request *listing* stays on REST deliberately. GraphQL pages by cursor,
+so each page needs the previous page's `endCursor` — twenty sequential round
+trips on a busy repository, where REST takes a page number and can fetch four at
+once. GraphQL is used only where it wins: fetching a lot of detail about a known
+set of objects. The branch ref listing stays on REST for a different reason —
+GraphQL's `refs(query:)` is a fuzzy search rather than the prefix match
+`matching-refs` performs, and a silent miss there means a sub-task charted as
+never started.
 
 Two things depend on what a particular deployment supports, and each has a
 working but expensive fallback:
@@ -230,15 +242,18 @@ working but expensive fallback:
 | --- | --- | --- |
 | Sprint fetched by id from the Agile API | Scan the project's issues | One request per hundred issues, per retrospective |
 | Changelogs attached to the issue search | One request per sub-task | Fifty to seventy requests, per retrospective |
+| Pull request detail batched over GraphQL | Three REST requests per pull request | About a hundred requests, per retrospective |
 
-Both fallbacks are announced in the log the first time they are taken. A silent
-fallback is the worse failure: every build would quietly pay for it and nothing
-would say why.
+The tracker fallbacks are announced in the log the first time they are taken. A
+silent fallback is the worse failure: every build would quietly pay for it and
+nothing would say why. The GraphQL one is per pull request rather than per site
+— a pull request with more reviews or timeline events than one query carries is
+simply refetched the old way.
 
-`cmd/probe` answers both questions against a real site before you wonder:
+`cmd/probe` answers all of it against the real services before you wonder:
 
 ```sh
-go run ./cmd/probe -sprint 7354
+go run ./cmd/probe -sprint 7354 -repo your-org/your-repo
 ```
 
 Each build also logs what it cost, which is the number to compare against:

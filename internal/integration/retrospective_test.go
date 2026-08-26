@@ -166,6 +166,10 @@ func fakeAPIRecording(t *testing.T, routes map[string]string, seen *requestLog) 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen.record(r.Method + " " + r.URL.Path)
 
+		if r.URL.Path == "/graphql" {
+			serveGraphQL(w, r, routes)
+			return
+		}
 		// The pull request listing is keyed by query string, not by path.
 		if body, handled := routeByQuery(r); handled {
 			io.WriteString(w, body)

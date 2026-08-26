@@ -27,17 +27,18 @@ import (
 )
 
 func main() {
-	sprint := flag.String("sprint", "", "id of a sprint to look up (required)")
+	sprint := flag.String("sprint", "", "id of a sprint to look up (required for the tracker probes)")
 	project := flag.String("project", "", "project key to sample issues from (defaults to the first configured project's)")
+	repo := flag.String("repo", "", "owner/name of a repository to probe the GraphQL path against")
 	flag.Parse()
 
-	if err := run(*sprint, *project); err != nil {
+	if err := run(*sprint, *project, *repo); err != nil {
 		fmt.Fprintln(os.Stderr, "probe failed:", err)
 		os.Exit(1)
 	}
 }
 
-func run(sprint, project string) error {
+func run(sprint, project, repo string) error {
 	settings, err := config.Load()
 	if err != nil {
 		return err
@@ -48,8 +49,8 @@ func run(sprint, project string) error {
 			return err
 		}
 	}
-	if sprint == "" {
-		return fmt.Errorf("-sprint is required; take an id from the sprint dropdown's URL")
+	if sprint == "" && repo == "" {
+		return fmt.Errorf("give -sprint to probe the tracker, -repo owner/name to probe the code host, or both")
 	}
 
 	client := httpclient.New(&http.Client{Timeout: 30 * time.Second})
@@ -57,6 +58,11 @@ func run(sprint, project string) error {
 	ctx := context.Background()
 
 	fmt.Printf("site    %s\nproject %s\n\n", settings.JiraBaseURL, project)
+
+	if sprint == "" {
+		probeGitHub(ctx, settings, client, repo)
+		return nil
+	}
 
 	p.check("sprint lookup by id",
 		"one request instead of a scan of every issue in the project",
@@ -73,6 +79,9 @@ func run(sprint, project string) error {
 		"the two queries stay as they are, which costs one round trip",
 		func() (string, error) { return p.subTasksInSprint(ctx, project, sprint) })
 
+	if repo != "" {
+		probeGitHub(ctx, settings, client, repo)
+	}
 	return nil
 }
 
