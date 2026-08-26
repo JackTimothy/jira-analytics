@@ -323,3 +323,23 @@ func aliasIndex(alias string) (int, bool) {
 	index, err := strconv.Atoi(digits)
 	return index, err == nil
 }
+
+func (c *CodeHost) countRefetches(repo domain.RepoRef, n int) {
+	if n == 0 {
+		return
+	}
+	c.rateLimitMu.Lock()
+	defer c.rateLimitMu.Unlock()
+	c.refetches[repo.String()] += n
+}
+
+// takeRefetchCount reads and clears the count, so the number reported belongs
+// to the build being reported rather than accumulating across all of them.
+func (c *CodeHost) takeRefetchCount(repo domain.RepoRef) int {
+	c.rateLimitMu.Lock()
+	defer c.rateLimitMu.Unlock()
+
+	n := c.refetches[repo.String()]
+	delete(c.refetches, repo.String())
+	return n
+}

@@ -56,6 +56,11 @@ type CodeHost struct {
 	// GraphQL, so this is discovered rather than configured.
 	graphQLRefused bool
 
+	// refetches counts, per repository, the pull requests the batch could not
+	// answer for. It is the number that explains the detail stage: each one
+	// costs the three requests the batch exists to avoid.
+	refetches map[string]int
+
 	logger *slog.Logger
 }
 
@@ -82,6 +87,7 @@ func NewCodeHost(config Config, client *httpclient.Client, opts ...Option) *Code
 		config:          config,
 		client:          client,
 		defaultBranches: map[string]string{},
+		refetches:       map[string]int{},
 		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	for _, opt := range opts {
@@ -165,6 +171,7 @@ func (c *CodeHost) eventsInRepo(
 	var (
 		pulls         []pullMatch
 		branches      []branchMatch
+		pages         int
 		listing       time.Duration
 		branchListing time.Duration
 	)
@@ -173,7 +180,7 @@ func (c *CodeHost) eventsInRepo(
 		var err error
 		if which == 0 {
 			at := time.Now()
-			pulls, err = c.pullsInWindow(ctx, repo, window, matcher)
+			pulls, pages, err = c.pullsInWindow(ctx, repo, window, matcher)
 			listing = time.Since(at)
 		} else {
 			at := time.Now()
@@ -200,14 +207,52 @@ func (c *CodeHost) eventsInRepo(
 		}
 	}
 
-	detailStart := time.Now()
-	if err := c.recordPullEvents(ctx, repo, pulls, policy, record); err != nil {
+	// Pull request detail and orphan branches are independent: the orphans were
+	// already determined above, from the branch listing and which branches the
+	// pull requests covered. Running them in sequence simply added their
+	// durations to the critical path.
+	var detail, orphanFetch time.Duration
+	err = parallel.ForEach(ctx, []int{0, 1}, 2, func(ctx context.Context, which int) error {
+		at := time.Now()
+		if which == 0 {
+			err := c.recordPullEvents(ctx, repo, pulls, policy, record)
+			detail = time.Since(at)
+			return err
+		}
+		err := c.recordOrphanBranches(ctx, repo, orphans, record)
+		orphanFetch = time.Since(at)
 		return err
-	}
-	detail := time.Since(detailStart)
+	})
 
-	orphanStart := time.Now()
-	err = parallel.ForEach(ctx, orphans, maxConcurrency, func(ctx context.Context, match branchMatch) error {
+	// One line per repository, because "the code host took seven seconds" is not
+	// a finding — which of its stages took them is. Two rounds of this work were
+	// spent optimising the wrong stage for want of exactly this.
+	//
+	// pages and rest_refetches are here because they are the two numbers that
+	// explain the two slowest stages: how much listing a repository needs, and
+	// how many pull requests the batch could not answer for.
+	c.logger.Info("code activity read",
+		slog.String("repo", repo.String()),
+		slog.Duration("pull_listing", listing.Round(time.Millisecond)),
+		slog.Duration("branch_listing", branchListing.Round(time.Millisecond)),
+		slog.Duration("pull_detail", detail.Round(time.Millisecond)),
+		slog.Duration("orphan_branches", orphanFetch.Round(time.Millisecond)),
+		slog.Duration("total", time.Since(started).Round(time.Millisecond)),
+		slog.Int("pages", pages),
+		slog.Int("pulls", len(pulls)),
+		slog.Int("rest_refetches", c.takeRefetchCount(repo)),
+		slog.Int("branches", len(orphans)))
+
+	return err
+}
+
+func (c *CodeHost) recordOrphanBranches(
+	ctx context.Context,
+	repo domain.RepoRef,
+	orphans []branchMatch,
+	record func(domain.IssueKey, []domain.Event),
+) error {
+	return parallel.ForEach(ctx, orphans, maxConcurrency, func(ctx context.Context, match branchMatch) error {
 		firstSeen, err := c.branchFirstSeen(ctx, repo, match.name)
 		if err != nil {
 			return err
@@ -217,21 +262,6 @@ func (c *CodeHost) eventsInRepo(
 		})
 		return nil
 	})
-
-	// One line per repository, because "the code host took eight seconds" is
-	// not a finding — which of its four stages took them is. Two rounds of this
-	// work were spent optimising the wrong stage for want of exactly this.
-	c.logger.Info("code activity read",
-		slog.String("repo", repo.String()),
-		slog.Duration("pull_listing", listing.Round(time.Millisecond)),
-		slog.Duration("branch_listing", branchListing.Round(time.Millisecond)),
-		slog.Duration("pull_detail", detail.Round(time.Millisecond)),
-		slog.Duration("orphan_branches", time.Since(orphanStart).Round(time.Millisecond)),
-		slog.Duration("total", time.Since(started).Round(time.Millisecond)),
-		slog.Int("pulls", len(pulls)),
-		slog.Int("branches", len(orphans)))
-
-	return err
 }
 
 type pullMatch struct {
@@ -280,9 +310,10 @@ const maxPageConcurrency = 10
 // Matching considers the head branch first and the title second. The branch is
 // the reliable signal while it exists; the title is what survives a squash
 // merge, where the message becomes "Title (#123)" and the branch is deleted.
-func (c *CodeHost) pullsInWindow(ctx context.Context, repo domain.RepoRef, window domain.Window, matcher keyMatcher) ([]pullMatch, error) {
+func (c *CodeHost) pullsInWindow(ctx context.Context, repo domain.RepoRef, window domain.Window, matcher keyMatcher) ([]pullMatch, int, error) {
 	cutoff := window.Start.Add(-pullLookback)
 	var matches []pullMatch
+	read := 0
 
 	// Guard against the same pull request arriving twice. Replaying an opened
 	// event after a merge would clear the merge and leave the timeline
@@ -301,8 +332,9 @@ func (c *CodeHost) pullsInWindow(ctx context.Context, repo domain.RepoRef, windo
 			return c.pullPage(ctx, repo, page)
 		})
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
+		read += len(pages)
 
 		// Pages are read in order even though they arrived together: the stop
 		// conditions all mean "everything after this is older still", which is
@@ -344,7 +376,7 @@ func (c *CodeHost) pullsInWindow(ctx context.Context, repo domain.RepoRef, windo
 			break
 		}
 	}
-	return matches, nil
+	return matches, read, nil
 }
 
 func (c *CodeHost) pullPage(ctx context.Context, repo domain.RepoRef, page int) ([]pullJSON, error) {
@@ -609,6 +641,7 @@ func (c *CodeHost) recordPullEvents(
 	// Whatever the batch could not answer for, ask the way it used to be asked.
 	// On a healthy repository this is empty.
 	sort.Slice(needREST, func(i, j int) bool { return needREST[i].pull.Number < needREST[j].pull.Number })
+	c.countRefetches(repo, len(needREST))
 	return parallel.ForEach(ctx, needREST, maxConcurrency, func(ctx context.Context, match pullMatch) error {
 		events, err := c.eventsForPullRequest(ctx, repo, match.pull, policy)
 		if err != nil {

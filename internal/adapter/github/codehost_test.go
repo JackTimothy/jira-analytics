@@ -482,7 +482,7 @@ func TestPullsInWindowIgnoresWorkOutsideTheSprint(t *testing.T) {
 		Start: time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC),
 		End:   time.Date(2027, 6, 15, 0, 0, 0, 0, time.UTC),
 	}
-	matches, err := host.pullsInWindow(context.Background(), testRepo, future, matcher)
+	matches, _, err := host.pullsInWindow(context.Background(), testRepo, future, matcher)
 	if err != nil {
 		t.Fatalf("pullsInWindow: %v", err)
 	}
@@ -511,7 +511,7 @@ func TestPullsInWindowIgnoresARepeatedListing(t *testing.T) {
 	host := NewCodeHost(Config{BaseURL: server.URL, Token: "t"},
 		httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })))
 
-	matches, err := host.pullsInWindow(context.Background(), testRepo, testGitHubWindow,
+	matches, _, err := host.pullsInWindow(context.Background(), testRepo, testGitHubWindow,
 		newKeyMatcher([]domain.IssueKey{"PROJ-10"}))
 	if err != nil {
 		t.Fatalf("pullsInWindow: %v", err)
@@ -564,7 +564,7 @@ func TestPullsInWindowDiscardsPagesFetchedPastTheCutoff(t *testing.T) {
 	host := NewCodeHost(Config{BaseURL: server.URL, Token: "t"},
 		httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })))
 
-	matches, err := host.pullsInWindow(context.Background(), testRepo, testGitHubWindow,
+	matches, _, err := host.pullsInWindow(context.Background(), testRepo, testGitHubWindow,
 		newKeyMatcher([]domain.IssueKey{"PROJ-10"}))
 	if err != nil {
 		t.Fatalf("pullsInWindow: %v", err)
@@ -1092,7 +1092,7 @@ func TestTheListingWaveGrowsAfterTheFirstRound(t *testing.T) {
 			host := NewCodeHost(Config{BaseURL: server.URL, Token: "t"},
 				httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })))
 
-			if _, err := host.pullsInWindow(context.Background(), testRepo, testGitHubWindow,
+			if _, _, err := host.pullsInWindow(context.Background(), testRepo, testGitHubWindow,
 				newKeyMatcher([]domain.IssueKey{"PROJ-10"})); err != nil {
 				t.Fatalf("pullsInWindow: %v", err)
 			}
@@ -1109,5 +1109,92 @@ func TestTheListingWaveGrowsAfterTheFirstRound(t *testing.T) {
 				t.Errorf("peak concurrency %d never exceeded the first wave, so the wave did not grow", peak)
 			}
 		})
+	}
+}
+
+// Orphan branches are determined before the pull detail is fetched — from the
+// branch listing and which branches the pull requests covered — so nothing
+// about them depends on the detail. Running the two in sequence put the whole
+// of the orphan stage on the critical path for nothing.
+//
+// The gate is per stage, not per request. Two orphan branches are fetched
+// concurrently with each other, so a barrier counting raw requests is satisfied
+// by the orphan stage alone and proves nothing about the two stages
+// overlapping — which is how the first version of this passed even when forced
+// to run them one after the other.
+func TestOrphanBranchesAreFetchedAlongsidePullDetail(t *testing.T) {
+	var mu sync.Mutex
+	arrived := map[string]bool{}
+
+	release := make(chan struct{})
+	var once sync.Once
+	var timedOut atomic.Bool
+
+	gate := func(stage string) {
+		mu.Lock()
+		first := !arrived[stage]
+		arrived[stage] = true
+		stages := len(arrived)
+		mu.Unlock()
+
+		if !first {
+			return
+		}
+		if stages >= 2 {
+			once.Do(func() { close(release) })
+		}
+		select {
+		case <-release:
+		case <-time.After(2 * time.Second):
+			timedOut.Store(true)
+		}
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/graphql":
+			gate("detail")
+			serveGraphQL(w, r, graphQLNormal)
+			return
+
+		case strings.Contains(r.URL.Path, "/compare/"):
+			gate("orphans")
+			// Any orphan branch will do; this test is about when the compare
+			// happens, not what it returns.
+			io.WriteString(w, `{"commits":[{"commit":{
+				"author":{"date":"2026-08-06T13:00:00Z"},
+				"committer":{"date":"2026-08-06T13:00:00Z"}}}]}`)
+			return
+
+		case r.URL.Path == "/repos/org/repo/pulls":
+			if r.URL.Query().Get("page") != "1" {
+				io.WriteString(w, `[]`)
+				return
+			}
+			io.WriteString(w, pullListFixture)
+			return
+		}
+
+		body, ok := fixtures[r.URL.Path]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"message":"no fixture for `+r.URL.Path+`"}`)
+			return
+		}
+		io.WriteString(w, body)
+	}))
+	defer server.Close()
+
+	host := NewCodeHost(Config{BaseURL: server.URL, Token: "t"},
+		httpclient.New(server.Client(), httpclient.WithSleep(func(context.Context, time.Duration) error { return nil })))
+
+	if _, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
+		domain.ReviewerPolicy{ExcludeBots: true},
+		[]domain.IssueKey{"PROJ-10", "PROJ-11", "PROJ-110"}, testGitHubWindow); err != nil {
+		t.Fatalf("LinkedEvents: %v", err)
+	}
+
+	if timedOut.Load() {
+		t.Error("one stage waited alone at the barrier — the orphan branches and the pull detail still run in sequence")
 	}
 }

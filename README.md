@@ -277,9 +277,16 @@ because "the code host took eight seconds" is not a finding and which of its
 four stages took them is:
 
 ```
-code activity read repo=acme/service pull_listing=7.4s branch_listing=0.3s
-  pull_detail=0.4s orphan_branches=0.2s total=7.9s pulls=35 branches=4
+code activity read repo=acme/service pull_listing=2.5s branch_listing=0.7s
+  pull_detail=3.6s orphan_branches=0.7s total=6.8s pages=20 pulls=43
+  rest_refetches=7 branches=5
 ```
+
+`pages` and `rest_refetches` are there because they explain the two slowest
+stages: how much listing a repository needs, and how many pull requests the
+batch could not answer for. The stages overlap in pairs — the two listings
+together, then the detail and the orphan branches together — so they do not sum
+to the total either.
 
 Two rounds of optimisation went into the wrong stage for want of exactly this
 line: removing a hundred requests from `pull_detail` changed the total by
