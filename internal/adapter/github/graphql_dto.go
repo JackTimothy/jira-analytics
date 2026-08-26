@@ -2,10 +2,9 @@ package github
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
-
-	"github.com/jacktimothy/jira-analytics/internal/domain"
 )
 
 // These types decode GraphQL into the shapes the REST path already produces.
@@ -36,24 +35,66 @@ type graphQLErrorJSON struct {
 	Path    []any  `json:"path"`
 }
 
-// err turns a GraphQL error array into one Go error naming every problem.
+// partition splits GraphQL errors into those that name one aliased pull request
+// and those that describe the query as a whole.
 //
-// All of them, not the first: a query about ten pull requests that fails on
-// three should say which three, since the usual cause is something structural
-// about the query rather than about any one pull request.
-func (e graphQLEnvelope) err(repo domain.RepoRef) error {
-	if len(e.Errors) == 0 {
-		return nil
-	}
-	messages := make([]string, 0, len(e.Errors))
+// The distinction decides everything downstream. GraphQL answers partially by
+// design: a query about ten pull requests can fail on two of them and return
+// the other eight perfectly well. Treating that as a failed query throws away
+// eight good answers and, worse, makes one inaccessible pull request look like
+// a broken deployment.
+func (e graphQLEnvelope) partition() (perAlias map[string]string, global []string) {
+	perAlias = map[string]string{}
+
 	for _, item := range e.Errors {
-		if item.Type != "" {
-			messages = append(messages, item.Type+": "+item.Message)
+		message := strings.TrimSpace(item.Type + " " + item.Message)
+		if alias, ok := item.alias(); ok {
+			perAlias[alias] = message
 			continue
 		}
-		messages = append(messages, item.Message)
+		global = append(global, message)
 	}
-	return fmt.Errorf("querying %s: %s", repo, strings.Join(messages, "; "))
+	sort.Strings(global)
+	return perAlias, global
+}
+
+// alias reads the pull request alias out of an error path such as
+// ["repository", "p3"].
+func (e graphQLErrorJSON) alias() (string, bool) {
+	for _, step := range e.Path {
+		name, ok := step.(string)
+		if !ok {
+			continue
+		}
+		if strings.HasPrefix(name, "p") && len(name) > 1 {
+			if _, numeric := aliasIndex(name); numeric {
+				return name, true
+			}
+		}
+	}
+	return "", false
+}
+
+// deniesEverything reports whether the errors say this deployment cannot use
+// the batched query at all, as opposed to this query having gone wrong.
+//
+// A token that cannot reach the GraphQL API says so on every request, so
+// retrying it on every build would be a permanent tax for a permanent fact.
+func deniesEverything(global []string) bool {
+	if len(global) == 0 {
+		return false
+	}
+	for _, message := range global {
+		switch {
+		case strings.HasPrefix(message, "FORBIDDEN"),
+			strings.HasPrefix(message, "UNAUTHORIZED"),
+			strings.Contains(message, "not accessible by personal access token"),
+			strings.Contains(message, "Resource not accessible by integration"):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 type graphPullJSON struct {

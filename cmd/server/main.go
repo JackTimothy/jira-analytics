@@ -58,7 +58,7 @@ func run(logger *slog.Logger) error {
 	codeHost := github.NewCodeHost(github.Config{
 		BaseURL: settings.GitHubBaseURL,
 		Token:   settings.GitHubToken,
-	}, client)
+	}, client, github.WithLogger(logger))
 
 	api := httpapi.NewServer(
 		projects,

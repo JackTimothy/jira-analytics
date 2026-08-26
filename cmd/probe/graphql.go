@@ -41,7 +41,10 @@ func probeGitHub(ctx context.Context, settings config.Config, client *httpclient
 		return
 	}
 	if len(numbers) == 0 {
-		fmt.Printf("✗ %s has no pull requests to probe with\n\n", repo)
+		// Still worth saying whether the credential can use GraphQL at all —
+		// that answer does not depend on the repository having pull requests.
+		fmt.Printf("!  %s has no pull requests to probe with\n\n", repo)
+		p.narrow(ctx, owner, name, 0)
 		return
 	}
 
@@ -49,8 +52,14 @@ func probeGitHub(ctx context.Context, settings config.Config, client *httpclient
 
 	answer, err := p.batch(ctx, owner, name, numbers)
 	if err != nil {
-		fmt.Printf("✗ the batched query\n  %v\n  consequence: the GraphQL path cannot be used at all\n\n", err)
+		fmt.Printf("✗ the batched query\n  %v\n\n", err)
+		p.narrow(ctx, owner, name, numbers[0])
 		return
+	}
+	if len(answer.denied) > 0 {
+		fmt.Printf("!  %d of %d pull requests were denied individually: %v\n"+
+			"   those fall back to REST; the rest still come from one query\n\n",
+			len(answer.denied), len(numbers), answer.denied)
 	}
 	fmt.Printf("✓ the batched query\n  %d pull requests answered in one request\n  ~105 requests per retrospective become ~4\n\n", len(answer.pulls))
 
@@ -124,8 +133,72 @@ func (p *githubProber) reportTruncation(answer batchAnswer) {
 		len(truncated), len(answer.pulls), truncated)
 }
 
+// narrow finds the smallest query this credential will not serve.
+//
+// "FORBIDDEN" on a query with eleven fields says nothing actionable. Asking for
+// one field at a time says exactly which permission is missing, which is the
+// difference between a diagnosis and a shrug.
+func (p *githubProber) narrow(ctx context.Context, owner, name string, number int) {
+	fmt.Println("  narrowing down what this credential may read:")
+
+	const repoRoot = `query($owner:String!,$name:String!){ repository(owner:$owner,name:$name)`
+
+	steps := []struct {
+		label string
+		query string
+	}{
+		{"GraphQL at all", `query{ viewer{ login } }`},
+		{"rateLimit", `query{ rateLimit{ cost remaining } }`},
+		{"the repository", repoRoot + `{ name } }`},
+	}
+	if number > 0 {
+		pull := repoRoot + fmt.Sprintf(`{ pullRequest(number:%d)`, number)
+		steps = append(steps,
+			struct{ label, query string }{"one pull request", pull + `{ number } } }`},
+			struct{ label, query string }{"its commits", pull + `{ commits(first:1){ totalCount } } } }`},
+			struct{ label, query string }{"its reviews", pull + `{ reviews(first:5){ totalCount } } } }`},
+			struct{ label, query string }{"its timeline", pull + `{ timelineItems(first:5, itemTypes:[MERGED_EVENT]){ totalCount } } } }`},
+		)
+	}
+
+	for _, step := range steps {
+		if err := p.tryQuery(ctx, owner, name, step.query); err != nil {
+			fmt.Printf("    ✗ %-18s %v\n", step.label, err)
+			fmt.Printf("\n  the first ✗ above is the permission to fix.\n" +
+				"  a classic token with repo scope reads all of these; a fine-grained token\n" +
+				"  needs Pull requests: Read, Contents: Read and Metadata: Read.\n\n" +
+				"  the app does not need this to work — it falls back to three REST requests\n" +
+				"  per pull request, which is about a hundred extra per retrospective.\n\n")
+			return
+		}
+		fmt.Printf("    ✓ %-18s readable\n", step.label)
+	}
+	fmt.Printf("\n  every field is readable on its own, so the failure is in the batch itself\n\n")
+}
+
+func (p *githubProber) tryQuery(ctx context.Context, owner, name, query string) error {
+	var envelope struct {
+		Errors []struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+			Path    []any  `json:"path"`
+		} `json:"errors"`
+	}
+	body := map[string]any{"query": query, "variables": map[string]any{"owner": owner, "name": name}}
+
+	if err := p.client.DoJSON(ctx, p.post(github.GraphQLEndpoint(p.githubBaseURL()), body), &envelope); err != nil {
+		return err
+	}
+	if len(envelope.Errors) == 0 {
+		return nil
+	}
+	first := envelope.Errors[0]
+	return fmt.Errorf("%s", strings.TrimSpace(first.Type+" "+first.Message))
+}
+
 type batchAnswer struct {
 	pulls     map[int]probedPull
+	denied    []string
 	rateLimit *struct {
 		Cost      int       `json:"cost"`
 		Remaining int       `json:"remaining"`
@@ -177,6 +250,7 @@ func (p *githubProber) batch(ctx context.Context, owner, name string, numbers []
 		Errors []struct {
 			Type    string `json:"type"`
 			Message string `json:"message"`
+			Path    []any  `json:"path"`
 		} `json:"errors"`
 	}
 
@@ -186,16 +260,24 @@ func (p *githubProber) batch(ctx context.Context, owner, name string, numbers []
 	}
 
 	// A 200 carrying errors is how GraphQL reports failure, so this is checked
-	// before anything in data is believed.
-	if len(envelope.Errors) > 0 {
-		messages := make([]string, 0, len(envelope.Errors))
-		for _, item := range envelope.Errors {
-			messages = append(messages, strings.TrimSpace(item.Type+" "+item.Message))
+	// before anything in data is believed. The path matters as much as the
+	// message: an error naming one alias denies one pull request, while an
+	// error with no path denies the query.
+	var denied []string
+	var global []string
+	for _, item := range envelope.Errors {
+		message := strings.TrimSpace(item.Type + " " + item.Message)
+		if alias := aliasIn(item.Path); alias != "" {
+			denied = append(denied, alias)
+			continue
 		}
-		return batchAnswer{}, fmt.Errorf("%s", strings.Join(messages, "; "))
+		global = append(global, message+describePath(item.Path))
+	}
+	if len(global) > 0 {
+		return batchAnswer{}, fmt.Errorf("%s", strings.Join(global, "; "))
 	}
 
-	answer := batchAnswer{pulls: map[int]probedPull{}, rateLimit: envelope.Data.RateLimit}
+	answer := batchAnswer{pulls: map[int]probedPull{}, denied: denied, rateLimit: envelope.Data.RateLimit}
 	for _, pull := range envelope.Data.Repository {
 		if pull == nil {
 			continue
@@ -290,4 +372,28 @@ func (p *githubProber) authorize(req *http.Request) {
 	if p.config.GitHubToken != "" {
 		req.Header.Set("Authorization", "Bearer "+p.config.GitHubToken)
 	}
+}
+
+// aliasIn reports the pull request alias an error path names, if any.
+func aliasIn(path []any) string {
+	for _, step := range path {
+		name, ok := step.(string)
+		if ok && strings.HasPrefix(name, "p") && len(name) > 1 {
+			return name
+		}
+	}
+	return ""
+}
+
+// describePath appends the field an error came from, which is what turns
+// "FORBIDDEN" into something a reader can act on.
+func describePath(path []any) string {
+	if len(path) == 0 {
+		return " (no path — the whole query)"
+	}
+	parts := make([]string, 0, len(path))
+	for _, step := range path {
+		parts = append(parts, fmt.Sprintf("%v", step))
+	}
+	return " (at " + strings.Join(parts, ".") + ")"
 }

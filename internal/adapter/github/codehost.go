@@ -4,6 +4,8 @@ package github
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
@@ -48,17 +50,44 @@ type CodeHost struct {
 	graphQLCost      int
 	graphQLRemaining int
 	graphQLResetAt   time.Time
+
+	// graphQLRefused records that this credential cannot use the batched
+	// query. Some tokens can read a pull request over REST and not over
+	// GraphQL, so this is discovered rather than configured.
+	graphQLRefused bool
+
+	logger *slog.Logger
 }
 
-func NewCodeHost(config Config, client *httpclient.Client) *CodeHost {
+// Option adjusts a CodeHost at construction.
+type Option func(*CodeHost)
+
+// WithLogger gives the code host somewhere to report a degraded path. Without
+// it the fallback to per-pull-request REST requests is silent, which is the
+// worst outcome: every build quietly costs a hundred extra requests and nothing
+// says why.
+func WithLogger(logger *slog.Logger) Option {
+	return func(c *CodeHost) {
+		if logger != nil {
+			c.logger = logger
+		}
+	}
+}
+
+func NewCodeHost(config Config, client *httpclient.Client, opts ...Option) *CodeHost {
 	if config.BaseURL == "" {
 		config.BaseURL = DefaultBaseURL
 	}
-	return &CodeHost{
+	host := &CodeHost{
 		config:          config,
 		client:          client,
 		defaultBranches: map[string]string{},
+		logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
+	for _, opt := range opts {
+		opt(host)
+	}
+	return host
 }
 
 func (c *CodeHost) request(path string, query url.Values) func() (*http.Request, error) {
@@ -477,6 +506,19 @@ func (c *CodeHost) recordPullEvents(
 	var mu sync.Mutex
 	var needREST []pullMatch
 	queued := map[int]struct{}{}
+
+	// Once the credential has been seen to refuse the batched query, there is
+	// nothing to gain from asking again on every build.
+	if c.graphQLKnownRefused() {
+		return parallel.ForEach(ctx, pulls, maxConcurrency, func(ctx context.Context, match pullMatch) error {
+			events, err := c.eventsForPullRequest(ctx, repo, match.pull, policy)
+			if err != nil {
+				return err
+			}
+			record(match.key, events)
+			return nil
+		})
+	}
 
 	err := parallel.ForEach(ctx, batchNumbers(numbers, graphQLBatchSize), maxConcurrency,
 		func(ctx context.Context, batch []int) error {

@@ -244,11 +244,18 @@ working but expensive fallback:
 | Changelogs attached to the issue search | One request per sub-task | Fifty to seventy requests, per retrospective |
 | Pull request detail batched over GraphQL | Three REST requests per pull request | About a hundred requests, per retrospective |
 
-The tracker fallbacks are announced in the log the first time they are taken. A
-silent fallback is the worse failure: every build would quietly pay for it and
-nothing would say why. The GraphQL one is per pull request rather than per site
-— a pull request with more reviews or timeline events than one query carries is
-simply refetched the old way.
+Every fallback is announced in the log the first time it is taken. A silent
+fallback is the worse failure: every build would quietly pay for it and nothing
+would say why.
+
+The GraphQL one has two granularities, because GraphQL answers partially by
+design. A credential that may not use the API at all is a standing fact, so it
+is recorded once and the batch is not attempted again. A single pull request
+denied by path, or one whose reviews and timeline exceed what a query carries,
+is refetched over REST on its own and the rest of the batch still comes from one
+request. Not all tokens can read over GraphQL what they can read over REST —
+fine-grained personal access tokens in particular — which is why this is
+discovered at runtime rather than configured.
 
 `cmd/probe` answers all of it against the real services before you wonder:
 

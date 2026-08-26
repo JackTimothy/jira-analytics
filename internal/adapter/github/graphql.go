@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jacktimothy/jira-analytics/internal/domain"
+	"github.com/jacktimothy/jira-analytics/internal/infra/httpclient"
 )
 
 // The GraphQL path exists for one reason: reading a pull request's timeline,
@@ -134,7 +137,9 @@ func (c *CodeHost) graphQLRequest(query string, variables map[string]any) func()
 // pullDetails fetches a batch of pull requests in one query.
 //
 // It returns the details keyed by pull request number, and the numbers whose
-// data arrived truncated and must be refetched over REST.
+// data did not arrive usable and must be refetched over REST — because the
+// response was truncated, because the answer omitted them, or because this
+// token may not read them. All three are the same instruction to the caller.
 func (c *CodeHost) pullDetails(ctx context.Context, repo domain.RepoRef, numbers []int) (map[int]pullDetail, []int, error) {
 	if len(numbers) == 0 {
 		return nil, nil, nil
@@ -146,28 +151,54 @@ func (c *CodeHost) pullDetails(ctx context.Context, repo domain.RepoRef, numbers
 		"name":  repo.Name,
 	})
 	if err := c.client.DoJSON(ctx, build, &envelope); err != nil {
+		// A token the GraphQL endpoint will not serve at all rejects every
+		// request the same way, so this is a fact about the deployment rather
+		// than about this query.
+		if refusesGraphQL(err) {
+			c.refuseGraphQL(err)
+			return nil, numbers, nil
+		}
 		return nil, nil, fmt.Errorf("querying pull request details for %s: %w", repo, err)
 	}
 
 	// GraphQL answers 200 OK with an errors array beside partial data, and
-	// httpclient treats any 200 as success. Charting half a sprint's review
-	// history as though that were all of it is the worst failure available
-	// here, so a partial answer is an error rather than a result.
-	if err := envelope.err(repo); err != nil {
-		return nil, nil, err
+	// httpclient treats any 200 as success — so the errors are read before
+	// anything in data is believed.
+	perAlias, global := envelope.partition()
+	if len(global) > 0 {
+		if deniesEverything(global) {
+			c.refuseGraphQL(fmt.Errorf("%s", strings.Join(global, "; ")))
+			return nil, numbers, nil
+		}
+		return nil, nil, fmt.Errorf("querying %s: %s", repo, strings.Join(global, "; "))
 	}
 
 	c.recordRateLimit(envelope.Data.RateLimit)
 
 	details := make(map[int]pullDetail, len(numbers))
-	var truncated []int
+	var refetch []int
+
+	// A pull request this token may not read individually is refetched over
+	// REST, where it may well be readable — the two APIs do not always agree
+	// about what a token can see. If REST refuses it too, that error surfaces
+	// there, which is the right place for it.
+	for alias := range perAlias {
+		if index, ok := aliasIndex(alias); ok && index < len(numbers) {
+			refetch = append(refetch, numbers[index])
+		}
+	}
 
 	for alias, raw := range envelope.Data.Repository {
 		if raw == nil {
+			// Null with no error of its own: nothing says why, so refetching is
+			// the only reading that cannot silently lose a pull request.
+			if index, ok := aliasIndex(alias); ok && index < len(numbers) {
+				refetch = append(refetch, numbers[index])
+			}
 			continue
 		}
 		if raw.truncated() {
-			truncated = append(truncated, raw.Number)
+			refetch = append(refetch, raw.Number)
 			continue
 		}
 		detail, err := raw.toDetail()
@@ -177,10 +208,64 @@ func (c *CodeHost) pullDetails(ctx context.Context, repo domain.RepoRef, numbers
 		details[raw.Number] = detail
 	}
 
-	// The map iteration above is unordered; a caller comparing runs should not
-	// see the refetch list shuffle.
-	sort.Ints(truncated)
-	return details, truncated, nil
+	// Map iteration is unordered; a caller comparing two runs should not see
+	// the refetch list shuffle.
+	sort.Ints(refetch)
+	return details, dedupeInts(refetch), nil
+}
+
+func dedupeInts(values []int) []int {
+	if len(values) < 2 {
+		return values
+	}
+	out := values[:1]
+	for _, value := range values[1:] {
+		if value != out[len(out)-1] {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+// refusesGraphQL reports whether an HTTP failure says this deployment cannot
+// use the GraphQL endpoint at all.
+func refusesGraphQL(err error) bool {
+	var status *httpclient.StatusError
+	if !errors.As(err, &status) {
+		return false
+	}
+	switch status.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return true
+	}
+	return false
+}
+
+// refuseGraphQL records that the batched query is unavailable here and says so
+// once.
+//
+// Once, because it is a standing fact about the credential; loudly, because the
+// consequence is a hundred extra requests on every build and nothing else would
+// explain why the retrospective is slow again.
+func (c *CodeHost) refuseGraphQL(cause error) {
+	c.rateLimitMu.Lock()
+	already := c.graphQLRefused
+	c.graphQLRefused = true
+	c.rateLimitMu.Unlock()
+
+	if already {
+		return
+	}
+	c.logger.Warn("this GitHub credential cannot use the batched GraphQL query",
+		slog.String("consequence", "pull request detail now costs three requests each, about a hundred per retrospective"),
+		slog.String("remedy", "a classic token with repo scope, or a fine-grained token granted Pull requests: Read and Contents: Read"),
+		slog.Any("error", cause))
+}
+
+func (c *CodeHost) graphQLKnownRefused() bool {
+	c.rateLimitMu.Lock()
+	defer c.rateLimitMu.Unlock()
+	return c.graphQLRefused
 }
 
 // recordRateLimit keeps the cost of a build observable. GitHub bills GraphQL by

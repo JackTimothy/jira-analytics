@@ -37,6 +37,14 @@ const (
 	// graphQLOmitsAPull drops one pull request from the answer without saying
 	// so — the silent gap the adapter must not believe.
 	graphQLOmitsAPull
+	// graphQLForbidden is what a credential that may not use the GraphQL API
+	// returns: a 200 carrying FORBIDDEN errors with no path.
+	graphQLForbidden
+	// graphQLForbidsOnePull denies a single pull request by path, leaving the
+	// rest of the batch perfectly good.
+	graphQLForbidsOnePull
+	// graphQLHTTPForbidden refuses at the transport layer instead.
+	graphQLHTTPForbidden
 )
 
 func serveGraphQL(w http.ResponseWriter, r *http.Request, mode graphQLMode) {
@@ -46,6 +54,19 @@ func serveGraphQL(w http.ResponseWriter, r *http.Request, mode graphQLMode) {
 	raw, _ := io.ReadAll(r.Body)
 	if err := json.Unmarshal(raw, &body); err != nil {
 		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	if mode == graphQLHTTPForbidden {
+		w.WriteHeader(http.StatusForbidden)
+		io.WriteString(w, `{"message":"Resource not accessible by personal access token"}`)
+		return
+	}
+
+	if mode == graphQLForbidden {
+		io.WriteString(w, `{"data":{"repository":null},"errors":[
+			{"type":"FORBIDDEN","message":"Resource not accessible by personal access token"},
+			{"type":"FORBIDDEN","message":"Resource not accessible by personal access token"}]}`)
 		return
 	}
 
@@ -67,8 +88,17 @@ func serveGraphQL(w http.ResponseWriter, r *http.Request, mode graphQLMode) {
 		entries = append(entries, fmt.Sprintf("%q:%s", "p"+alias, pullAsGraphQL(number, mode)))
 	}
 
+	errors := ""
+	if mode == graphQLForbidsOnePull && len(matches) > 0 {
+		// One pull request denied by path, the rest answered normally. This is
+		// how GraphQL reports a partially readable batch.
+		errors = `,"errors":[{"type":"FORBIDDEN",
+			"message":"Resource not accessible by personal access token",
+			"path":["repository","p0"]}]`
+	}
+
 	fmt.Fprintf(w, `{"data":{"rateLimit":{"cost":9,"remaining":4991,"resetAt":"2026-08-26T05:00:00Z"},
-		"repository":{%s}}}`, strings.Join(entries, ","))
+		"repository":{%s}}%s}`, strings.Join(entries, ","), errors)
 }
 
 // pullAsGraphQL rebuilds one pull request's REST fixtures in GraphQL's shape.

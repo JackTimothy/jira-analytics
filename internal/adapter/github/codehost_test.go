@@ -1,9 +1,11 @@
 package github
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -818,5 +820,104 @@ func TestBatchNumbersSplitsEvenlyAndKeepsTheRemainder(t *testing.T) {
 	}
 	if len(batches[2]) != 1 || batches[2][0] != 7 {
 		t.Errorf("remainder batch = %v, want [7]", batches[2])
+	}
+}
+
+// A credential that may not use the GraphQL API says so on every request. That
+// is a reason to go back to REST, not a reason to fail the retrospective — the
+// REST path worked before the batch existed and still works.
+func TestAForbiddenGraphQLCredentialFallsBackInsteadOfFailing(t *testing.T) {
+	for name, mode := range map[string]graphQLMode{
+		"errors in a 200": graphQLForbidden,
+		"an HTTP 403":     graphQLHTTPForbidden,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var log bytes.Buffer
+			host, seen := fakeGitHubIn(t, mode)
+			WithLogger(slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelWarn})))(host)
+
+			events, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
+				domain.ReviewerPolicy{ExcludeBots: true},
+				[]domain.IssueKey{"PROJ-10", "PROJ-11"}, testGitHubWindow)
+			if err != nil {
+				t.Fatalf("LinkedEvents failed rather than falling back: %v", err)
+			}
+			if len(events) == 0 {
+				t.Fatal("fell back to nothing")
+			}
+
+			refetched := false
+			for _, path := range seen.snapshot() {
+				if strings.HasSuffix(path, "/timeline") {
+					refetched = true
+				}
+			}
+			if !refetched {
+				t.Error("never used the REST path after GraphQL refused")
+			}
+			if !strings.Contains(log.String(), "cannot use the batched GraphQL query") {
+				t.Error("degraded silently; nothing would explain a hundred extra requests per build")
+			}
+		})
+	}
+}
+
+// Having learned the credential cannot use it, the adapter should stop asking.
+func TestARefusedCredentialIsNotRetriedOnEveryBuild(t *testing.T) {
+	var log bytes.Buffer
+	host, seen := fakeGitHubIn(t, graphQLForbidden)
+	WithLogger(slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelWarn})))(host)
+
+	for i := 0; i < 3; i++ {
+		if _, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
+			domain.ReviewerPolicy{ExcludeBots: true},
+			[]domain.IssueKey{"PROJ-10", "PROJ-11"}, testGitHubWindow); err != nil {
+			t.Fatalf("LinkedEvents: %v", err)
+		}
+	}
+
+	queries := 0
+	for _, path := range seen.snapshot() {
+		if path == "/graphql" {
+			queries++
+		}
+	}
+	if queries != 1 {
+		t.Errorf("asked GraphQL %d times after being refused, want 1", queries)
+	}
+	if strings.Count(log.String(), "cannot use the batched GraphQL query") != 1 {
+		t.Error("warned more than once about a fact it already knew")
+	}
+}
+
+// GraphQL answers partially by design. One pull request denied by path must not
+// discard the other nine, and must not look like a broken deployment.
+func TestOnePullRequestDeniedByPathFallsBackForThatPullRequestOnly(t *testing.T) {
+	var log bytes.Buffer
+	host, seen := fakeGitHubIn(t, graphQLForbidsOnePull)
+	WithLogger(slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelWarn})))(host)
+
+	events, err := host.LinkedEvents(context.Background(), []domain.RepoRef{testRepo},
+		domain.ReviewerPolicy{ExcludeBots: true},
+		[]domain.IssueKey{"PROJ-10", "PROJ-11"}, testGitHubWindow)
+	if err != nil {
+		t.Fatalf("one inaccessible pull request failed the whole batch: %v", err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("got events for %d keys, want 2", len(events))
+	}
+
+	// Exactly one pull request refetched, not both.
+	timelines := 0
+	for _, path := range seen.snapshot() {
+		if strings.HasSuffix(path, "/timeline") {
+			timelines++
+		}
+	}
+	if timelines != 1 {
+		t.Errorf("refetched %d timelines, want 1 — only the denied pull request needed it", timelines)
+	}
+	if strings.Contains(log.String(), "cannot use the batched GraphQL query") {
+		t.Error("one denied pull request was mistaken for a credential that cannot use GraphQL at all")
 	}
 }
