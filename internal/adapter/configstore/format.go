@@ -3,6 +3,7 @@ package configstore
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jacktimothy/jira-analytics/internal/domain"
 )
@@ -26,7 +27,73 @@ type projectFormat struct {
 }
 
 type settingsFormat struct {
-	Timezone string `yaml:"timezone"`
+	Timezone     string              `yaml:"timezone"`
+	WorkingHours *workingHoursFormat `yaml:"workingHours,omitempty"`
+}
+
+// workingHoursFormat uses day names and HH:MM clock times because the file is
+// written and read by people; the minutes-past-midnight form is internal.
+type workingHoursFormat struct {
+	Days  []string `yaml:"days,flow"`
+	Start string   `yaml:"start"`
+	End   string   `yaml:"end"`
+}
+
+var dayNames = map[string]time.Weekday{
+	"sunday": time.Sunday, "monday": time.Monday, "tuesday": time.Tuesday,
+	"wednesday": time.Wednesday, "thursday": time.Thursday,
+	"friday": time.Friday, "saturday": time.Saturday,
+}
+
+func (f *workingHoursFormat) toDomain() (*domain.WorkingHours, error) {
+	if f == nil {
+		return nil, nil
+	}
+	hours := domain.WorkingHours{}
+	for _, name := range f.Days {
+		day, ok := dayNames[strings.ToLower(strings.TrimSpace(name))]
+		if !ok {
+			return nil, fmt.Errorf("unknown working day %q", name)
+		}
+		hours.Days = append(hours.Days, day)
+	}
+	var err error
+	if hours.Start, err = parseClock(f.Start); err != nil {
+		return nil, fmt.Errorf("workingHours.start: %w", err)
+	}
+	if hours.End, err = parseClock(f.End); err != nil {
+		return nil, fmt.Errorf("workingHours.end: %w", err)
+	}
+	if err := hours.Validate(); err != nil {
+		return nil, err
+	}
+	return &hours, nil
+}
+
+func parseClock(value string) (int, error) {
+	parsed, err := time.Parse("15:04", strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("%q is not an HH:MM clock time", value)
+	}
+	return parsed.Hour()*60 + parsed.Minute(), nil
+}
+
+func formatClock(minutes int) string {
+	return fmt.Sprintf("%02d:%02d", minutes/60, minutes%60)
+}
+
+func fromDomainHours(hours *domain.WorkingHours) *workingHoursFormat {
+	if hours == nil {
+		return nil
+	}
+	out := &workingHoursFormat{
+		Start: formatClock(hours.Start),
+		End:   formatClock(hours.End),
+	}
+	for _, day := range hours.Days {
+		out.Days = append(out.Days, strings.ToLower(day.String()))
+	}
+	return out
 }
 
 type trackerFormat struct {
@@ -101,8 +168,12 @@ func (p projectFormat) toDomain() (domain.Project, error) {
 		repos = append(repos, domain.RepoRef{Owner: repo.Owner, Name: repo.Name})
 	}
 
-	settings := domain.ProjectSettings{Timezone: p.Settings.Timezone}
-	if _, err := settings.Location(); err != nil {
+	workingHours, err := p.Settings.WorkingHours.toDomain()
+	if err != nil {
+		return domain.Project{}, err
+	}
+	settings := domain.ProjectSettings{Timezone: p.Settings.Timezone, WorkingHours: workingHours}
+	if err := settings.Validate(); err != nil {
 		return domain.Project{}, err
 	}
 
@@ -141,9 +212,12 @@ func fromDomain(projects []domain.Project) fileFormat {
 		}
 		excludeBots := project.Reviewers.ExcludeBots
 		out.Projects = append(out.Projects, projectFormat{
-			ID:       string(project.ID),
-			Name:     project.Name,
-			Settings: settingsFormat{Timezone: project.Settings.Timezone},
+			ID:   string(project.ID),
+			Name: project.Name,
+			Settings: settingsFormat{
+				Timezone:     project.Settings.Timezone,
+				WorkingHours: fromDomainHours(project.Settings.WorkingHours),
+			},
 			Tracker: trackerFormat{
 				Type:       SupportedTrackerType,
 				ProjectKey: project.Tracker.ProjectKey,

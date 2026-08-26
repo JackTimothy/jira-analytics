@@ -90,7 +90,7 @@ func (s *Store) Get(_ context.Context, id domain.ProjectID) (domain.Project, err
 // same directory and renamed over the original, so a crash mid-write cannot
 // leave an operator with a truncated project file and no way to start.
 func (s *Store) UpdateSettings(_ context.Context, id domain.ProjectID, settings domain.ProjectSettings) error {
-	if _, err := settings.Location(); err != nil {
+	if err := settings.Validate(); err != nil {
 		return err
 	}
 

@@ -275,3 +275,58 @@ func TestRetrospectiveAlwaysRendersWarningsAsAnArray(t *testing.T) {
 		t.Errorf("expected an empty array, got %s", rec.Body)
 	}
 }
+
+func TestUpdateSettingsAppliesWorkingHours(t *testing.T) {
+	server, projects, _ := newTestServer()
+	rec := do(t, server, http.MethodPatch, "/api/v1/projects/activation/settings",
+		`{"workingHours":{"days":["monday","tuesday","wednesday"],"start":"09:00","end":"17:30"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body)
+	}
+
+	applied := projects.updates[0].WorkingHours
+	if applied == nil {
+		t.Fatal("working hours did not reach the store")
+	}
+	if len(applied.Days) != 3 || applied.Start != 9*60 || applied.End != 17*60+30 {
+		t.Errorf("stored %+v", applied)
+	}
+	// Timezone was omitted from the patch and must survive untouched.
+	if projects.updates[0].Timezone != "America/New_York" {
+		t.Errorf("timezone changed to %q", projects.updates[0].Timezone)
+	}
+
+	var got projectView
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if got.Settings.WorkingHours.Start != "09:00" || got.Settings.WorkingHours.End != "17:30" {
+		t.Errorf("response hours = %+v", got.Settings.WorkingHours)
+	}
+}
+
+func TestUpdateSettingsRejectsMalformedWorkingHours(t *testing.T) {
+	server, _, _ := newTestServer()
+	for name, body := range map[string]string{
+		"bad day":   `{"workingHours":{"days":["funday"],"start":"09:00","end":"17:00"}}`,
+		"bad clock": `{"workingHours":{"days":["monday"],"start":"9am","end":"17:00"}}`,
+	} {
+		rec := do(t, server, http.MethodPatch, "/api/v1/projects/activation/settings", body)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%s: got %d, want 422: %s", name, rec.Code, rec.Body)
+		}
+	}
+}
+
+func TestProjectsExposeTheScheduleWithDefaults(t *testing.T) {
+	server, _, _ := newTestServer()
+	rec := do(t, server, http.MethodGet, "/api/v1/projects/activation", "")
+	var got projectView
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	hours := got.Settings.WorkingHours
+	if hours.Start != "08:00" || hours.End != "18:00" || len(hours.Days) != 5 {
+		t.Errorf("expected the default schedule on an unconfigured project, got %+v", hours)
+	}
+}

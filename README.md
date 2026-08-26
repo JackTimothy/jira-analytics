@@ -112,7 +112,9 @@ client on Vite's port and proxies the API to `localhost:8080`.
 ```
 GET   /api/v1/projects
 GET   /api/v1/projects/{projectID}
-PATCH /api/v1/projects/{projectID}/settings          {"timezone": "America/New_York"}
+PATCH /api/v1/projects/{projectID}/settings
+      {"timezone": "America/New_York",
+       "workingHours": {"days": ["monday","tuesday"], "start": "08:00", "end": "18:00"}}
 GET   /api/v1/projects/{projectID}/sprints
 GET   /api/v1/projects/{projectID}/sprints/{sprintID}/retrospective?scope=all|committed
 ```
@@ -165,6 +167,24 @@ is the single worst pair under deuteranopia.
 
 A table view exists alongside the chart, and every state is labelled in the
 legend, so identity never rests on colour alone.
+
+By default the axis shows **working hours to scale and collapses everything
+else**. A two-week sprint is 336 hours of which roughly 100 are working time,
+so a linear axis spends 70% of its width on hours where nothing happens.
+Nights and weekends become fixed narrow bands — recessed, with hairline seams,
+weekends labelled `S·S` — so an off-hours transition still has somewhere to sit
+and still reads as off-hours. The toggle back to linear time exists because a
+compressed axis deliberately understates elapsed time: work sitting over a
+weekend looks like a thin band, not 64 hours.
+
+Compression is by the project's configured schedule, never by where the data
+happens to be quiet: a silent stretch in the middle of a working day is the
+most valuable thing a retrospective can show, and collapsing it would hide
+exactly the finding the chart exists to surface.
+
+The schedule is anchored to the local clock across daylight-saving
+transitions — the working span is 08:00–18:00 on the 23-hour day and the
+25-hour day alike, with the off-hours band absorbing the difference.
 
 Segments are clamped to a minimum width and painted widest-first. A state can
 be real and consequential while lasting seconds — an approval moments before

@@ -1,6 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import type { Interval, Parent, Sprint } from "../types";
+import { buildCompressedScale, buildLinearScale } from "../timescale";
+import type { AxisSegment, Interval, Parent, Sprint } from "../types";
 import { stateColor, stateLabel } from "../types";
 
 const LABEL_WIDTH = 268;
@@ -106,6 +107,14 @@ function truncate(text: string, limit: number): string {
   return text.length > limit ? `${text.slice(0, limit - 1)}\u2026` : text;
 }
 
+/**
+ * A band longer than 20 hours contains at least a full day off — a weekend or
+ * holiday — and earns a label; ordinary nights stay quiet.
+ */
+function isWeekendBand(fromMs: number, toMs: number): boolean {
+  return toMs - fromMs > 20 * 3_600_000;
+}
+
 function formatDay(date: Date): string {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
@@ -117,7 +126,17 @@ function formatDuration(from: string, to: string): string {
   return `${(hours / 24).toFixed(1)} days`;
 }
 
-export function Timeline({ parents, sprint }: { parents: Parent[]; sprint: Sprint }) {
+export function Timeline({
+  parents,
+  sprint,
+  axis,
+  compressed,
+}: {
+  parents: Parent[];
+  sprint: Sprint;
+  axis: AxisSegment[];
+  compressed: boolean;
+}) {
   const { ref, width } = useContainerWidth();
   const [hover, setHover] = useState<HoverState | null>(null);
 
@@ -130,13 +149,16 @@ export function Timeline({ parents, sprint }: { parents: Parent[]; sprint: Sprin
   const totalWidth = LABEL_WIDTH + plotWidth + PADDING_RIGHT;
   const totalHeight = AXIS_HEIGHT + height + 8;
 
-  const span = end.getTime() - start.getTime();
-  const scale = (iso: string) => {
-    const ratio = (new Date(iso).getTime() - start.getTime()) / span;
-    return LABEL_WIDTH + Math.max(0, Math.min(1, ratio)) * plotWidth;
-  };
+  const scale = useMemo(() => {
+    const linear = buildLinearScale(start.getTime(), end.getTime(), LABEL_WIDTH, plotWidth);
+    if (!compressed) return linear;
+    // An axis the server did not send, or one that cannot compress (all
+    // off-hours, or bands wider than the plot), falls back to linear.
+    return buildCompressedScale(axis, LABEL_WIDTH, plotWidth) ?? linear;
+  }, [axis, compressed, start, end, plotWidth]);
 
   const ticks = useMemo(() => dayTicks(start, end), [start, end]);
+  const isCompressed = scale.segments.length > 1;
 
   if (rows.length === 0) {
     return <p className="muted">No sub-tasks to chart for this sprint.</p>;
@@ -151,35 +173,101 @@ export function Timeline({ parents, sprint }: { parents: Parent[]; sprint: Sprin
         aria-label={`State timeline for ${sprint.name}, grouped by parent work item`}
         style={{ display: "block" }}
       >
-        {/* Recessive gridlines: day boundaries, behind everything. */}
-        <g>
-          {ticks.map((tick) => {
-            const x = scale(tick.toISOString());
-            return (
-              <g key={tick.toISOString()}>
-                <line
-                  x1={x}
-                  x2={x}
-                  y1={AXIS_HEIGHT - 6}
-                  y2={totalHeight}
-                  stroke="var(--gridline)"
-                  strokeWidth={1}
-                />
-                <text x={x + 4} y={AXIS_HEIGHT - 12} fontSize={11} fill="var(--text-muted)">
-                  {formatDay(tick)}
+        {/* The axis frame, behind everything. Compressed mode draws each
+            off-hours span as a recessed band with hairline seams — the visual
+            statement that time there is not to scale. Linear mode keeps plain
+            day gridlines. */}
+        {isCompressed ? (
+          <g>
+            {scale.segments.map((segment, index) =>
+              segment.kind === "OFF_HOURS" ? (
+                <g key={`band-${index}`}>
+                  <rect
+                    x={segment.x}
+                    y={AXIS_HEIGHT - 6}
+                    width={segment.width}
+                    height={totalHeight - AXIS_HEIGHT + 6}
+                    fill="var(--plane)"
+                  />
+                  <line
+                    x1={segment.x}
+                    x2={segment.x}
+                    y1={AXIS_HEIGHT - 6}
+                    y2={totalHeight}
+                    stroke="var(--gridline)"
+                    strokeWidth={1}
+                  />
+                  <line
+                    x1={segment.x + segment.width}
+                    x2={segment.x + segment.width}
+                    y1={AXIS_HEIGHT - 6}
+                    y2={totalHeight}
+                    stroke="var(--gridline)"
+                    strokeWidth={1}
+                  />
+                  {isWeekendBand(segment.fromMs, segment.toMs) && (
+                    <text
+                      x={segment.x + segment.width / 2}
+                      y={AXIS_HEIGHT - 12}
+                      fontSize={10}
+                      textAnchor="middle"
+                      fill="var(--text-muted)"
+                    >
+                      S·S
+                    </text>
+                  )}
+                </g>
+              ) : (
+                <text
+                  key={`label-${index}`}
+                  x={segment.x + 4}
+                  y={AXIS_HEIGHT - 12}
+                  fontSize={11}
+                  fill="var(--text-muted)"
+                >
+                  {segment.width > 40 ? formatDay(new Date(segment.fromMs)) : ""}
                 </text>
-              </g>
-            );
-          })}
-          <line
-            x1={LABEL_WIDTH}
-            x2={LABEL_WIDTH + plotWidth}
-            y1={AXIS_HEIGHT - 6}
-            y2={AXIS_HEIGHT - 6}
-            stroke="var(--gridline)"
-            strokeWidth={1}
-          />
-        </g>
+              ),
+            )}
+            <line
+              x1={LABEL_WIDTH}
+              x2={LABEL_WIDTH + plotWidth}
+              y1={AXIS_HEIGHT - 6}
+              y2={AXIS_HEIGHT - 6}
+              stroke="var(--gridline)"
+              strokeWidth={1}
+            />
+          </g>
+        ) : (
+          <g>
+            {ticks.map((tick) => {
+              const x = scale(tick.toISOString());
+              return (
+                <g key={tick.toISOString()}>
+                  <line
+                    x1={x}
+                    x2={x}
+                    y1={AXIS_HEIGHT - 6}
+                    y2={totalHeight}
+                    stroke="var(--gridline)"
+                    strokeWidth={1}
+                  />
+                  <text x={x + 4} y={AXIS_HEIGHT - 12} fontSize={11} fill="var(--text-muted)">
+                    {formatDay(tick)}
+                  </text>
+                </g>
+              );
+            })}
+            <line
+              x1={LABEL_WIDTH}
+              x2={LABEL_WIDTH + plotWidth}
+              y1={AXIS_HEIGHT - 6}
+              y2={AXIS_HEIGHT - 6}
+              stroke="var(--gridline)"
+              strokeWidth={1}
+            />
+          </g>
+        )}
 
         {rows.map((row) => {
           const y = AXIS_HEIGHT + row.y;

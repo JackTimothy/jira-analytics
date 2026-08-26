@@ -1,13 +1,24 @@
 import { useState } from "react";
 
 import { api } from "../api";
-import type { Project } from "../types";
+import type { Project, WorkingHours } from "../types";
+
+const ALL_DAYS = [
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+  "sunday",
+] as const;
 
 /**
- * The timezone decides which calendar day a sprint's end falls on, and so which
- * work counts as committed. It is the one setting a user can change, and the
- * server rejects an unrecognised zone rather than defaulting, so the error is
- * surfaced here rather than swallowed.
+ * The two settings that shape every retrospective: the timezone decides which
+ * calendar day a sprint's end falls on (and so which work counts as
+ * committed), and the working hours decide which parts of the axis are shown
+ * to scale. The server rejects invalid values rather than defaulting, so
+ * errors are surfaced here rather than swallowed.
  */
 export function ProjectSettings({
   project,
@@ -16,50 +27,98 @@ export function ProjectSettings({
   project: Project;
   onChange: (project: Project) => void;
 }) {
-  const [value, setValue] = useState(project.settings.timezone);
+  const [timezone, setTimezone] = useState(project.settings.timezone);
+  const [hours, setHours] = useState<WorkingHours>(project.settings.workingHours);
   const [status, setStatus] = useState<"idle" | "saving" | "saved">("idle");
   const [error, setError] = useState<string | null>(null);
 
   const zones = supportedTimezones(project.settings.timezone);
 
-  async function save(next: string) {
-    setValue(next);
+  async function save(patch: { timezone?: string; workingHours?: WorkingHours }) {
     setStatus("saving");
     setError(null);
     try {
-      const updated = await api.updateTimezone(project.id, next);
+      const updated = await api.updateSettings(project.id, patch);
+      setTimezone(updated.settings.timezone);
+      setHours(updated.settings.workingHours);
       onChange(updated);
       setStatus("saved");
     } catch (caught) {
       setStatus("idle");
-      setValue(project.settings.timezone);
+      setTimezone(project.settings.timezone);
+      setHours(project.settings.workingHours);
       setError(caught instanceof Error ? caught.message : String(caught));
     }
   }
 
+  function toggleDay(day: string) {
+    const next = hours.days.includes(day)
+      ? hours.days.filter((d) => d !== day)
+      : [...hours.days, day];
+    void save({ workingHours: { ...hours, days: next } });
+  }
+
   return (
     <div className="stack">
-      <div className="field">
-        <label htmlFor="timezone">
-          Project timezone
-          <span className="muted small">
-            {" "}
-            — decides which day a sprint ends on, and so which work counts as committed
+      <div className="row" style={{ alignItems: "flex-end", gap: 24 }}>
+        <div className="field">
+          <label htmlFor="timezone">
+            Project timezone
+            <span className="muted small"> — decides which day a sprint ends on</span>
+          </label>
+          <select
+            id="timezone"
+            value={timezone}
+            disabled={status === "saving"}
+            onChange={(event) => void save({ timezone: event.target.value })}
+          >
+            {zones.map((zone) => (
+              <option key={zone} value={zone}>
+                {zone}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="field" style={{ maxWidth: "none" }}>
+          <span className="small">
+            Working hours
+            <span className="muted small"> — the part of the timeline shown to scale</span>
           </span>
-        </label>
-        <select
-          id="timezone"
-          value={value}
-          disabled={status === "saving"}
-          onChange={(event) => void save(event.target.value)}
-        >
-          {zones.map((zone) => (
-            <option key={zone} value={zone}>
-              {zone}
-            </option>
-          ))}
-        </select>
+          <div className="row" style={{ gap: 8 }}>
+            <input
+              type="time"
+              aria-label="Working hours start"
+              value={hours.start}
+              disabled={status === "saving"}
+              onChange={(event) => void save({ workingHours: { ...hours, start: event.target.value } })}
+            />
+            <span className="muted">to</span>
+            <input
+              type="time"
+              aria-label="Working hours end"
+              value={hours.end}
+              disabled={status === "saving"}
+              onChange={(event) => void save({ workingHours: { ...hours, end: event.target.value } })}
+            />
+            <span className="row" style={{ gap: 4 }} role="group" aria-label="Working days">
+              {ALL_DAYS.map((day) => (
+                <button
+                  key={day}
+                  className="day-chip"
+                  aria-pressed={hours.days.includes(day)}
+                  disabled={status === "saving"}
+                  onClick={() => toggleDay(day)}
+                  title={day}
+                >
+                  {day.slice(0, 1).toUpperCase()}
+                </button>
+              ))}
+            </span>
+          </div>
+        </div>
       </div>
+
       {status === "saved" && <p className="small muted">Saved.</p>}
       {error && (
         <p className="notice error small" role="alert">

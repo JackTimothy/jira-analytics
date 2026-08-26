@@ -1,4 +1,4 @@
-import type { Project, Retrospective, Scope, Sprint } from "./types";
+import type { Project, Retrospective, Scope, Sprint, WorkingHours } from "./types";
 
 /**
  * The API client. Errors carry the server's message where there is one, so a
@@ -36,9 +36,12 @@ export const api = {
         `/retrospective?scope=${scope}`,
     ),
 
-  updateTimezone: (projectId: string, timezone: string) =>
+  updateSettings: (
+    projectId: string,
+    patch: { timezone?: string; workingHours?: WorkingHours },
+  ) =>
     request<Project>(`/api/v1/projects/${encodeURIComponent(projectId)}/settings`, {
       method: "PATCH",
-      body: JSON.stringify({ timezone }),
+      body: JSON.stringify(patch),
     }),
 };

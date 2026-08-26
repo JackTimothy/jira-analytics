@@ -19,6 +19,11 @@ type Retrospective struct {
 	Sprint   Sprint
 	Groups   []ParentGroup
 	Warnings []string
+
+	// Axis is the sprint window split into working and off-hours spans, in the
+	// project's timezone — what lets the client compress dead time while
+	// keeping off-hours transitions visible.
+	Axis []AxisSegment
 }
 
 // Scope selects which parents appear in a retrospective.

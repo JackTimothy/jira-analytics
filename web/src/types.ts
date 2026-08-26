@@ -12,10 +12,16 @@ export const STATES = [
 
 export type State = (typeof STATES)[number];
 
+export interface WorkingHours {
+  days: string[];
+  start: string; // "08:00"
+  end: string; // "18:00"
+}
+
 export interface Project {
   id: string;
   name: string;
-  settings: { timezone: string };
+  settings: { timezone: string; workingHours: WorkingHours };
   tracker: { projectKey: string; boardId: string };
   repos: string[];
 }
@@ -47,10 +53,19 @@ export interface Parent {
   subtasks: SubTask[];
 }
 
+export type AxisSegmentKind = "WORKING" | "OFF_HOURS";
+
+export interface AxisSegment {
+  from: string;
+  to: string;
+  kind: AxisSegmentKind;
+}
+
 export interface Retrospective {
   sprint: Sprint;
   parents: Parent[];
   warnings: string[];
+  axis: AxisSegment[];
 }
 
 export type Scope = "all" | "committed";

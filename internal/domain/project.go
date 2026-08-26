@@ -13,6 +13,29 @@ const DefaultTimezone = "America/New_York"
 // ProjectSettings holds the parts of a project a user may edit at runtime.
 type ProjectSettings struct {
 	Timezone string
+
+	// WorkingHours drives the compressed timeline axis. Nil means the default
+	// schedule; a configured value must validate.
+	WorkingHours *WorkingHours
+}
+
+// Schedule resolves the configured working hours, defaulting when unset.
+func (s ProjectSettings) Schedule() WorkingHours {
+	if s.WorkingHours == nil {
+		return DefaultWorkingHours()
+	}
+	return *s.WorkingHours
+}
+
+// Validate checks everything a settings write must satisfy.
+func (s ProjectSettings) Validate() error {
+	if _, err := s.Location(); err != nil {
+		return err
+	}
+	if s.WorkingHours != nil {
+		return s.WorkingHours.Validate()
+	}
+	return nil
 }
 
 // Location resolves the configured timezone, defaulting when unset. An

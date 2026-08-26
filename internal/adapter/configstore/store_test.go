@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jacktimothy/jira-analytics/internal/domain"
 )
@@ -208,5 +209,54 @@ projects:
 	}
 	if project.Tracker.ProjectKey != "X" {
 		t.Errorf("unexpected tracker: %+v", project.Tracker)
+	}
+}
+
+func TestWorkingHoursRoundTripThroughTheFile(t *testing.T) {
+	store, path := writeStore(t, validFile)
+	ctx := context.Background()
+
+	hours := &domain.WorkingHours{
+		Days:  []time.Weekday{time.Monday, time.Wednesday},
+		Start: 7 * 60,
+		End:   15*60 + 45,
+	}
+	if err := store.UpdateSettings(ctx, "activation",
+		domain.ProjectSettings{Timezone: "America/New_York", WorkingHours: hours}); err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("reloading: %v", err)
+	}
+	project, err := reloaded.Get(ctx, "activation")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	got := project.Settings.WorkingHours
+	if got == nil {
+		t.Fatal("working hours did not survive the round trip")
+	}
+	if len(got.Days) != 2 || got.Days[1] != time.Wednesday || got.Start != 420 || got.End != 945 {
+		t.Errorf("round trip produced %+v", got)
+	}
+}
+
+func TestLoadRejectsMalformedWorkingHours(t *testing.T) {
+	contents := `
+projects:
+  - id: a
+    settings:
+      workingHours: { days: [monday], start: "18:00", end: "08:00" }
+    tracker: { type: jira, projectKey: X }
+    repos: [{host: github, owner: o, name: r}]
+`
+	path := filepath.Join(t.TempDir(), "projects.yaml")
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("expected an error for start after end")
 	}
 }

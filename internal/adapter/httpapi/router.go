@@ -67,7 +67,8 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
 }
 
 type updateSettingsRequest struct {
-	Timezone *string `json:"timezone"`
+	Timezone     *string           `json:"timezone"`
+	WorkingHours *workingHoursView `json:"workingHours"`
 }
 
 func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
@@ -88,6 +89,14 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 	settings := current.Settings
 	if body.Timezone != nil {
 		settings.Timezone = *body.Timezone
+	}
+	if body.WorkingHours != nil {
+		hours, err := body.WorkingHours.toDomain()
+		if err != nil {
+			writeError(w, s.logger, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		settings.WorkingHours = hours
 	}
 
 	if err := s.projects.UpdateSettings(r.Context(), id, settings); err != nil {

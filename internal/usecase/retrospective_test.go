@@ -308,3 +308,30 @@ func TestBuildCommittedScopeDropsWarningsForFilteredOutWork(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildIncludesTheCompressedAxis(t *testing.T) {
+	projects, tracker, code := buildFixture()
+	result, err := NewRetrospective(projects, tracker, code).
+		Build(context.Background(), RetrospectiveRequest{ProjectID: "activation", SprintID: "100", Scope: domain.ScopeAll})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	if len(result.Axis) == 0 {
+		t.Fatal("the retrospective carries no axis segments")
+	}
+	if !result.Axis[0].From.Equal(testSprint.Start) {
+		t.Errorf("axis starts at %s, want the sprint start", result.Axis[0].From)
+	}
+	if !result.Axis[len(result.Axis)-1].To.Equal(testSprint.End) {
+		t.Errorf("axis ends at %s, want the sprint end", result.Axis[len(result.Axis)-1].To)
+	}
+	// The sprint spans a weekend, so both kinds must appear.
+	kinds := map[domain.AxisSegmentKind]bool{}
+	for _, s := range result.Axis {
+		kinds[s.Kind] = true
+	}
+	if !kinds[domain.SegmentWorking] || !kinds[domain.SegmentOffHours] {
+		t.Errorf("axis has kinds %v, want both working and off-hours", kinds)
+	}
+}

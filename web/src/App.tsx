@@ -186,6 +186,10 @@ function RetrospectiveView({
 }) {
   const [scope, setScope] = useState<Scope>("all");
   const [asTable, setAsTable] = useState(false);
+  // Compressed by default: nights and weekends collapse to narrow bands so
+  // working hours get the space. Linear is one click away for judging real
+  // elapsed time.
+  const [compressed, setCompressed] = useState(true);
 
   const { data, error, loading } = useAsync<Retrospective>(
     () => api.retrospective(project.id, sprint.id, scope),
@@ -219,13 +223,25 @@ function RetrospectiveView({
           </span>
         </div>
 
-        <div className="segmented" role="group" aria-label="View">
-          <button aria-pressed={!asTable} onClick={() => setAsTable(false)}>
-            Chart
-          </button>
-          <button aria-pressed={asTable} onClick={() => setAsTable(true)}>
-            Table
-          </button>
+        <div className="row">
+          {!asTable && (
+            <div className="segmented" role="group" aria-label="Time axis">
+              <button aria-pressed={compressed} onClick={() => setCompressed(true)}>
+                Working hours
+              </button>
+              <button aria-pressed={!compressed} onClick={() => setCompressed(false)}>
+                Linear time
+              </button>
+            </div>
+          )}
+          <div className="segmented" role="group" aria-label="View">
+            <button aria-pressed={!asTable} onClick={() => setAsTable(false)}>
+              Chart
+            </button>
+            <button aria-pressed={asTable} onClick={() => setAsTable(true)}>
+              Table
+            </button>
+          </div>
         </div>
       </div>
 
@@ -238,7 +254,12 @@ function RetrospectiveView({
             {asTable ? (
               <TimelineTable parents={data.parents} />
             ) : (
-              <Timeline parents={data.parents} sprint={data.sprint} />
+              <Timeline
+                parents={data.parents}
+                sprint={data.sprint}
+                axis={data.axis ?? []}
+                compressed={compressed}
+              />
             )}
           </section>
 

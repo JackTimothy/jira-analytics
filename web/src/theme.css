@@ -172,3 +172,20 @@ table.data th, table.data td {
 table.data th { color: var(--text-secondary); font-weight: 600; }
 
 .scroll-x { overflow-x: auto; }
+
+.day-chip {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 0;
+}
+
+.day-chip[aria-pressed="true"] {
+  background: var(--focus);
+  border-color: var(--focus);
+  color: #ffffff;
+}

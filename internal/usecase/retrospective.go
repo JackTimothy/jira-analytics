@@ -50,9 +50,11 @@ func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (do
 		return domain.Retrospective{}, fmt.Errorf("loading sprint parents: %w", err)
 	}
 
+	axis := domain.AxisSegments(sprint.Window(), project.Settings.Schedule(), location)
+
 	parents = selectScope(parents, sprint, location, req.Scope)
 	if len(parents) == 0 {
-		return domain.Retrospective{Sprint: sprint, Groups: nil}, nil
+		return domain.Retrospective{Sprint: sprint, Groups: nil, Axis: axis}, nil
 	}
 
 	subTasks, err := r.tracker.SubTasksOf(ctx, keysOf(parents))
@@ -60,7 +62,7 @@ func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (do
 		return domain.Retrospective{}, fmt.Errorf("loading sub-tasks: %w", err)
 	}
 	if len(subTasks) == 0 {
-		return domain.Retrospective{Sprint: sprint, Groups: emptyGroups(parents, sprint, location)}, nil
+		return domain.Retrospective{Sprint: sprint, Groups: emptyGroups(parents, sprint, location), Axis: axis}, nil
 	}
 
 	subTaskKeys := subTaskKeysOf(subTasks)
@@ -75,7 +77,7 @@ func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (do
 		return domain.Retrospective{}, fmt.Errorf("loading code activity: %w", err)
 	}
 
-	return r.assemble(sprint, location, parents, subTasks, history, codeEvents), nil
+	return r.assemble(sprint, location, project.Settings.Schedule(), parents, subTasks, history, codeEvents), nil
 }
 
 func (r *Retrospective) findSprint(ctx context.Context, tracker domain.TrackerRef, id domain.SprintID) (domain.Sprint, error) {
@@ -94,6 +96,7 @@ func (r *Retrospective) findSprint(ctx context.Context, tracker domain.TrackerRe
 func (r *Retrospective) assemble(
 	sprint domain.Sprint,
 	location *time.Location,
+	schedule domain.WorkingHours,
 	parents []domain.WorkItem,
 	subTasks []domain.SubTask,
 	history map[domain.IssueKey][]domain.StatusChange,
@@ -152,7 +155,12 @@ func (r *Retrospective) assemble(
 		})
 	}
 
-	return domain.Retrospective{Sprint: sprint, Groups: groups, Warnings: warnings}
+	return domain.Retrospective{
+		Sprint:   sprint,
+		Groups:   groups,
+		Warnings: warnings,
+		Axis:     domain.AxisSegments(window, schedule, location),
+	}
 }
 
 // initialStatus recovers the status a sub-task held before its first recorded

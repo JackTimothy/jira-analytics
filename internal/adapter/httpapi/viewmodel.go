@@ -1,6 +1,8 @@
 package httpapi
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jacktimothy/jira-analytics/internal/domain"
@@ -19,7 +21,61 @@ type projectView struct {
 }
 
 type settingsView struct {
-	Timezone string `json:"timezone"`
+	Timezone     string           `json:"timezone"`
+	WorkingHours workingHoursView `json:"workingHours"`
+}
+
+// workingHoursView speaks day names and HH:MM clock times; the
+// minutes-past-midnight representation stays internal.
+type workingHoursView struct {
+	Days  []string `json:"days"`
+	Start string   `json:"start"`
+	End   string   `json:"end"`
+}
+
+func presentWorkingHours(hours domain.WorkingHours) workingHoursView {
+	days := make([]string, 0, len(hours.Days))
+	for _, day := range hours.Days {
+		days = append(days, strings.ToLower(day.String()))
+	}
+	return workingHoursView{
+		Days:  days,
+		Start: fmt.Sprintf("%02d:%02d", hours.Start/60, hours.Start%60),
+		End:   fmt.Sprintf("%02d:%02d", hours.End/60, hours.End%60),
+	}
+}
+
+var weekdayByName = map[string]time.Weekday{
+	"sunday": time.Sunday, "monday": time.Monday, "tuesday": time.Tuesday,
+	"wednesday": time.Wednesday, "thursday": time.Thursday,
+	"friday": time.Friday, "saturday": time.Saturday,
+}
+
+func (v workingHoursView) toDomain() (*domain.WorkingHours, error) {
+	hours := domain.WorkingHours{}
+	for _, name := range v.Days {
+		day, ok := weekdayByName[strings.ToLower(strings.TrimSpace(name))]
+		if !ok {
+			return nil, fmt.Errorf("%w: unknown working day %q", domain.ErrInvalidSettings, name)
+		}
+		hours.Days = append(hours.Days, day)
+	}
+	var err error
+	if hours.Start, err = parseClockView(v.Start); err != nil {
+		return nil, err
+	}
+	if hours.End, err = parseClockView(v.End); err != nil {
+		return nil, err
+	}
+	return &hours, nil
+}
+
+func parseClockView(value string) (int, error) {
+	parsed, err := time.Parse("15:04", strings.TrimSpace(value))
+	if err != nil {
+		return 0, fmt.Errorf("%w: %q is not an HH:MM clock time", domain.ErrInvalidSettings, value)
+	}
+	return parsed.Hour()*60 + parsed.Minute(), nil
 }
 
 type trackerView struct {
@@ -37,11 +93,14 @@ func presentProject(p domain.Project) projectView {
 		timezone = domain.DefaultTimezone
 	}
 	return projectView{
-		ID:       string(p.ID),
-		Name:     p.Name,
-		Settings: settingsView{Timezone: timezone},
-		Tracker:  trackerView{ProjectKey: p.Tracker.ProjectKey, BoardID: p.Tracker.BoardID},
-		Repos:    repos,
+		ID:   string(p.ID),
+		Name: p.Name,
+		Settings: settingsView{
+			Timezone:     timezone,
+			WorkingHours: presentWorkingHours(p.Settings.Schedule()),
+		},
+		Tracker: trackerView{ProjectKey: p.Tracker.ProjectKey, BoardID: p.Tracker.BoardID},
+		Repos:   repos,
 	}
 }
 
@@ -73,9 +132,24 @@ func presentSprints(sprints []domain.Sprint) []sprintView {
 }
 
 type retrospectiveView struct {
-	Sprint   sprintView   `json:"sprint"`
-	Parents  []parentView `json:"parents"`
-	Warnings []string     `json:"warnings"`
+	Sprint   sprintView        `json:"sprint"`
+	Parents  []parentView      `json:"parents"`
+	Warnings []string          `json:"warnings"`
+	Axis     []axisSegmentView `json:"axis"`
+}
+
+type axisSegmentView struct {
+	From time.Time `json:"from"`
+	To   time.Time `json:"to"`
+	Kind string    `json:"kind"`
+}
+
+func presentAxis(segments []domain.AxisSegment) []axisSegmentView {
+	out := make([]axisSegmentView, 0, len(segments))
+	for _, segment := range segments {
+		out = append(out, axisSegmentView{From: segment.From, To: segment.To, Kind: segment.Kind.String()})
+	}
+	return out
 }
 
 type parentView struct {
@@ -142,5 +216,6 @@ func presentRetrospective(r domain.Retrospective) retrospectiveView {
 		Sprint:   presentSprint(r.Sprint),
 		Parents:  parents,
 		Warnings: warnings,
+		Axis:     presentAxis(r.Axis),
 	}
 }
