@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"sort"
@@ -47,6 +49,26 @@ type Tracker struct {
 	// request per hundred issues, and the answer changes at most once a sprint.
 	sprintsMu sync.Mutex
 	sprints   map[string]sprintCacheEntry
+
+	logger *slog.Logger
+
+	// agileWarned keeps the fallback warning to once per process. It is worth
+	// saying loudly and worth saying only once.
+	agileWarned sync.Once
+}
+
+// Option adjusts a Tracker at construction.
+type Option func(*Tracker)
+
+// WithLogger gives the tracker somewhere to report a degraded path. Without it
+// the fallback below is silent, which is the worst outcome: every build quietly
+// pays for a full project scan and nothing says why.
+func WithLogger(logger *slog.Logger) Option {
+	return func(t *Tracker) {
+		if logger != nil {
+			t.logger = logger
+		}
+	}
 }
 
 type sprintCacheEntry struct {
@@ -58,8 +80,16 @@ type sprintCacheEntry struct {
 // restart, long enough that repeated navigation does not rescan the project.
 const sprintCacheTTL = 5 * time.Minute
 
-func NewTracker(config Config, client *httpclient.Client) *Tracker {
-	return &Tracker{config: config, client: client}
+func NewTracker(config Config, client *httpclient.Client, opts ...Option) *Tracker {
+	tracker := &Tracker{
+		config: config,
+		client: client,
+		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	for _, opt := range opts {
+		opt(tracker)
+	}
+	return tracker
 }
 
 // pageSize is Jira's practical maximum for these endpoints.
@@ -165,6 +195,63 @@ func (t *Tracker) ListSprints(ctx context.Context, tracker domain.TrackerRef) ([
 
 	t.storeSprints(tracker.ProjectKey, sprints)
 	return sprints, nil
+}
+
+// Sprint returns one sprint's dates by id.
+//
+// It asks the Agile API directly rather than scanning the project. This is the
+// single largest saving in a retrospective build: the scan behind ListSprints
+// costs one request per hundred issues that have ever been in a sprint —
+// thirty-odd on a mature project — and every one of them was being paid to
+// learn two timestamps.
+//
+// Fetching a sprint *by id* has none of the ambiguity that made board-based
+// listing wrong. The objection there was that a shared board's sprint list
+// contains other teams' sprints and nothing distinguishes them; here the caller
+// already holds the id, so there is no "whose sprint is this" question to get
+// wrong. The project scoping that keeps other teams out of the retrospective
+// happens in SprintParents, which is where it belongs.
+//
+// The Agile API may be unavailable to a token that can read the platform API,
+// so a failure falls back to the scan rather than failing the build.
+func (t *Tracker) Sprint(ctx context.Context, tracker domain.TrackerRef, id domain.SprintID) (domain.Sprint, error) {
+	var raw sprintJSON
+	path := "/rest/agile/1.0/sprint/" + url.PathEscape(string(id))
+
+	err := t.client.DoJSON(ctx, t.request(http.MethodGet, path, nil, nil), &raw)
+	if err == nil {
+		sprint, convErr := raw.toDomain()
+		if convErr == nil && !sprint.Start.IsZero() && !sprint.End.IsZero() {
+			return sprint, nil
+		}
+		// A sprint that exists but has never been started carries no dates, and
+		// no amount of scanning will invent them.
+		if convErr == nil {
+			return domain.Sprint{}, fmt.Errorf("%w: sprint %s has no start or end date", domain.ErrNotFound, id)
+		}
+		err = convErr
+	}
+
+	t.agileWarned.Do(func() {
+		t.logger.Warn("falling back to a full project scan to resolve sprints",
+			slog.String("endpoint", path),
+			slog.String("consequence", "every retrospective now costs one extra request per hundred issues in the project"),
+			slog.Any("error", err))
+	})
+	return t.sprintFromScan(ctx, tracker, id)
+}
+
+func (t *Tracker) sprintFromScan(ctx context.Context, tracker domain.TrackerRef, id domain.SprintID) (domain.Sprint, error) {
+	sprints, err := t.ListSprints(ctx, tracker)
+	if err != nil {
+		return domain.Sprint{}, fmt.Errorf("listing sprints: %w", err)
+	}
+	for _, sprint := range sprints {
+		if sprint.ID == id {
+			return sprint, nil
+		}
+	}
+	return domain.Sprint{}, fmt.Errorf("%w: sprint %s", domain.ErrNotFound, id)
 }
 
 // sprintsInIssue pulls the sprint objects out of an issue's sprint custom

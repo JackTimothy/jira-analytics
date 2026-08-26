@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,6 +53,11 @@ var jiraRoutes = map[string]string{
 			{"field":"status","from":"10039","fromString":"To Do","to":"3","toString":"In Progress"}]}]}`,
 	"/rest/api/3/issue/PROJ-20/changelog": `{"isLast":true,"values":[]}`,
 	"/rest/api/3/issue/PROJ-30/changelog": `{"isLast":true,"values":[]}`,
+
+	// The retrospective asks for its one sprint directly rather than scanning
+	// the project for it.
+	"/rest/agile/1.0/sprint/7354": `{"id":100,"name":"Sprint 26-31","state":"closed",
+		"startDate":"2026-08-03T09:00:00.000-0400","endDate":"2026-08-17T14:00:00.000-0400"}`,
 }
 
 // The three JQL queries share one endpoint, so the fake routes on the query
@@ -135,8 +141,16 @@ var githubRoutes = map[string]string{
 }
 
 func fakeAPI(t *testing.T, routes map[string]string) *httptest.Server {
+	return fakeAPIRecording(t, routes, &requestLog{})
+}
+
+// fakeAPIRecording is fakeAPI with a log of what was asked for, so a test can
+// assert on requests that should not have been made at all.
+func fakeAPIRecording(t *testing.T, routes map[string]string, seen *requestLog) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen.record(r.Method + " " + r.URL.Path)
+
 		// The pull request listing is keyed by query string, not by path.
 		if body, handled := routeByQuery(r); handled {
 			io.WriteString(w, body)
@@ -184,9 +198,15 @@ func routeByQuery(r *http.Request) (string, bool) {
 }
 
 func buildStack(t *testing.T) http.Handler {
+	handler, _ := buildStackRecording(t)
+	return handler
+}
+
+func buildStackRecording(t *testing.T) (http.Handler, *requestLog) {
 	t.Helper()
 
-	jiraServer := fakeAPI(t, jiraRoutes)
+	jiraCalls := &requestLog{}
+	jiraServer := fakeAPIRecording(t, jiraRoutes, jiraCalls)
 	githubServer := fakeAPI(t, githubRoutes)
 
 	path := filepath.Join(t.TempDir(), "projects.yaml")
@@ -220,7 +240,25 @@ projects:
 		usecase.NewSprints(projects, tracker),
 		usecase.NewRetrospective(projects, tracker, codeHost),
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
-	).Routes()
+	).Routes(), jiraCalls
+}
+
+// The whole-project scan is what a retrospective used to pay to learn two
+// timestamps: one request per hundred issues that have ever been in a sprint.
+// Asserting on the field lookup is the sharpest available proxy, since it is
+// the scan's unavoidable first step and nothing else in the build needs it.
+func TestRetrospectiveNeverScansTheProjectToFindItsSprint(t *testing.T) {
+	handler, jiraCalls := buildStackRecording(t)
+
+	if body := fetch(t, handler, "/api/v1/projects/team/sprints/7354/retrospective"); body.Sprint.Name != "Sprint 26-31" {
+		t.Fatalf("sprint = %+v", body.Sprint)
+	}
+	if jiraCalls.contains("GET /rest/api/3/field") {
+		t.Error("the sprint field was looked up, so the project scan ran after all")
+	}
+	if !jiraCalls.contains("GET /rest/agile/1.0/sprint/7354") {
+		t.Error("the sprint was not fetched by id")
+	}
 }
 
 type retrospectiveBody struct {
@@ -388,4 +426,28 @@ func TestSprintListingEndToEnd(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "Sprint 26-31") {
 		t.Errorf("body = %s", rec.Body)
 	}
+}
+
+// requestLog records what the fakes were asked for. Mutex-guarded because both
+// adapters fan out.
+type requestLog struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (l *requestLog) record(call string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.calls = append(l.calls, call)
+}
+
+func (l *requestLog) contains(call string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, seen := range l.calls {
+		if seen == call {
+			return true
+		}
+	}
+	return false
 }

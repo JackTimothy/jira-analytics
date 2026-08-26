@@ -46,6 +46,20 @@ func (f fakeTracker) ListSprints(context.Context, domain.TrackerRef) ([]domain.S
 	return f.sprints, f.err
 }
 
+// The fake answers by searching its own list, which is what a tracker with no
+// direct lookup would do. The interactor must not care which it got.
+func (f fakeTracker) Sprint(_ context.Context, _ domain.TrackerRef, id domain.SprintID) (domain.Sprint, error) {
+	if f.err != nil {
+		return domain.Sprint{}, f.err
+	}
+	for _, sprint := range f.sprints {
+		if sprint.ID == id {
+			return sprint, nil
+		}
+	}
+	return domain.Sprint{}, fmt.Errorf("%w: sprint %s", domain.ErrNotFound, id)
+}
+
 func (f fakeTracker) SprintParents(context.Context, domain.TrackerRef, domain.SprintID) ([]domain.WorkItem, error) {
 	return f.parents, f.err
 }

@@ -221,16 +221,11 @@ func (r *Retrospective) linkedEvents(ctx context.Context, trace Trace, project d
 func (r *Retrospective) findSprint(ctx context.Context, trace Trace, tracker domain.TrackerRef, id domain.SprintID) (domain.Sprint, error) {
 	defer trace.Phase("sprint")()
 
-	sprints, err := r.tracker.ListSprints(ctx, tracker)
+	sprint, err := r.tracker.Sprint(ctx, tracker, id)
 	if err != nil {
-		return domain.Sprint{}, fmt.Errorf("listing sprints: %w", err)
+		return domain.Sprint{}, err
 	}
-	for _, sprint := range sprints {
-		if sprint.ID == id {
-			return sprint, nil
-		}
-	}
-	return domain.Sprint{}, fmt.Errorf("%w: sprint %s", domain.ErrNotFound, id)
+	return sprint, nil
 }
 
 func (r *Retrospective) assemble(

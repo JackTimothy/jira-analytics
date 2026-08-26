@@ -1,10 +1,13 @@
 package jira
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -70,6 +73,10 @@ func (l *requestLog) snapshot() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]string(nil), l.calls...)
+}
+
+func (l *requestLog) contains(call string) bool {
+	return l.count(call) > 0
 }
 
 func (l *requestLog) count(call string) int {
@@ -533,5 +540,110 @@ func TestStatusHistoryFetchesChangelogsConcurrently(t *testing.T) {
 	}
 	if peak.Load() > maxConcurrency {
 		t.Errorf("peak concurrency was %d, want at most %d", peak.Load(), maxConcurrency)
+	}
+}
+
+func TestSprintFetchesOneSprintWithoutScanningTheProject(t *testing.T) {
+	tracker, seen := newFakeJira(t, map[string]string{
+		"/rest/agile/1.0/sprint/7354": `{"id":7354,"name":"Sprint 26-31","state":"closed",
+			"startDate":"2026-07-29T16:00:35.925Z","endDate":"2026-08-12T18:00:00.000Z"}`,
+	})
+
+	sprint, err := tracker.Sprint(context.Background(), domain.TrackerRef{ProjectKey: "PROJ"}, "7354")
+	if err != nil {
+		t.Fatalf("Sprint: %v", err)
+	}
+	if sprint.Name != "Sprint 26-31" {
+		t.Errorf("name = %q", sprint.Name)
+	}
+	if !sprint.End.Equal(time.Date(2026, 8, 12, 18, 0, 0, 0, time.UTC)) {
+		t.Errorf("end = %s", sprint.End)
+	}
+
+	// The whole point: one request, and none of the scan behind ListSprints.
+	for _, call := range seen.snapshot() {
+		if strings.Contains(call, "/search/jql") || strings.Contains(call, "/rest/api/3/field") {
+			t.Errorf("scanned the project to answer a single-sprint question: %s", call)
+		}
+	}
+}
+
+// The Agile API may be unavailable to a token that can read the platform API.
+// Losing the retrospective entirely over that would be a poor trade for the
+// requests saved, so the scan remains as a fallback.
+func TestSprintFallsBackToTheScanWhenTheAgileAPIIsUnavailable(t *testing.T) {
+	tracker, seen := newFakeJira(t, map[string]string{
+		// No route for /rest/agile/1.0/sprint/7354, so the fake 404s it.
+		"/rest/api/3/field":      fieldsFixture,
+		"/rest/api/3/search/jql": sprintScanFixture,
+	})
+
+	sprint, err := tracker.Sprint(context.Background(), domain.TrackerRef{ProjectKey: "PROJ"}, "7354")
+	if err != nil {
+		t.Fatalf("Sprint: %v", err)
+	}
+	if sprint.Name != "Sprint 26-31" {
+		t.Errorf("name = %q, want the sprint recovered from the scan", sprint.Name)
+	}
+	if !seen.contains("GET /rest/agile/1.0/sprint/7354") {
+		t.Error("never tried the direct lookup first")
+	}
+	if seen.count("POST /rest/api/3/search/jql") == 0 {
+		t.Error("did not fall back to the scan")
+	}
+}
+
+// A sprint that exists but was never started carries no dates. Scanning the
+// whole project cannot invent them, so the fallback is pointless there.
+func TestSprintDoesNotScanForASprintThatHasNoDates(t *testing.T) {
+	tracker, seen := newFakeJira(t, map[string]string{
+		"/rest/agile/1.0/sprint/7400": `{"id":7400,"name":"Never started","state":"future"}`,
+	})
+
+	_, err := tracker.Sprint(context.Background(), domain.TrackerRef{ProjectKey: "PROJ"}, "7400")
+	if !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("got %v, want ErrNotFound", err)
+	}
+	if seen.count("POST /rest/api/3/search/jql") != 0 {
+		t.Error("scanned the project for dates that do not exist")
+	}
+}
+
+// A silent fallback is the worst outcome available here: every build quietly
+// pays for a full project scan and nothing says why, so the optimisation looks
+// like it simply did not work.
+func TestSprintWarnsOnceWhenItFallsBackToTheScan(t *testing.T) {
+	var log bytes.Buffer
+	tracker, _ := newFakeJira(t, map[string]string{
+		"/rest/api/3/field":      fieldsFixture,
+		"/rest/api/3/search/jql": sprintScanFixture,
+	})
+	WithLogger(slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelWarn})))(tracker)
+
+	for i := 0; i < 3; i++ {
+		if _, err := tracker.Sprint(context.Background(), domain.TrackerRef{ProjectKey: "PROJ"}, "7354"); err != nil {
+			t.Fatalf("Sprint: %v", err)
+		}
+	}
+
+	warnings := strings.Count(log.String(), "falling back to a full project scan")
+	if warnings != 1 {
+		t.Errorf("logged the fallback %d times, want exactly once — worth saying loudly, worth saying once", warnings)
+	}
+}
+
+func TestSprintSaysNothingOnTheFastPath(t *testing.T) {
+	var log bytes.Buffer
+	tracker, _ := newFakeJira(t, map[string]string{
+		"/rest/agile/1.0/sprint/7354": `{"id":7354,"name":"Sprint 26-31","state":"closed",
+			"startDate":"2026-07-29T16:00:35.925Z","endDate":"2026-08-12T18:00:00.000Z"}`,
+	})
+	WithLogger(slog.New(slog.NewTextHandler(&log, &slog.HandlerOptions{Level: slog.LevelWarn})))(tracker)
+
+	if _, err := tracker.Sprint(context.Background(), domain.TrackerRef{ProjectKey: "PROJ"}, "7354"); err != nil {
+		t.Fatalf("Sprint: %v", err)
+	}
+	if log.Len() != 0 {
+		t.Errorf("warned on the fast path: %s", log.String())
 	}
 }

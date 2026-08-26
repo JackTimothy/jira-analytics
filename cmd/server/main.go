@@ -53,7 +53,7 @@ func run(logger *slog.Logger) error {
 		BaseURL:  settings.JiraBaseURL,
 		Email:    settings.JiraEmail,
 		APIToken: settings.JiraAPIToken,
-	}, client)
+	}, client, jira.WithLogger(logger))
 
 	codeHost := github.NewCodeHost(github.Config{
 		BaseURL: settings.GitHubBaseURL,

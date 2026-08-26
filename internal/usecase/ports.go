@@ -19,6 +19,16 @@ type IssueTracker interface {
 	// ListSprints returns the sprints of a project, most recent first.
 	ListSprints(ctx context.Context, tracker domain.TrackerRef) ([]domain.Sprint, error)
 
+	// Sprint returns one sprint's dates by id.
+	//
+	// It exists separately from ListSprints because the two questions have
+	// wildly different costs. A tracker may have to walk a project's entire
+	// history to enumerate its sprints, and asking it to do that to answer
+	// "when did sprint 90 run" is the difference between one request and
+	// dozens. Implementations that cannot answer directly may fall back to
+	// searching the list.
+	Sprint(ctx context.Context, tracker domain.TrackerRef, id domain.SprintID) (domain.Sprint, error)
+
 	// SprintParents returns the parent work items in a sprint, each carrying
 	// the due date that decides committed scope.
 	SprintParents(ctx context.Context, tracker domain.TrackerRef, sprint domain.SprintID) ([]domain.WorkItem, error)
