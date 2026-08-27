@@ -3,6 +3,8 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "./api";
 import { Legend } from "./components/Legend";
 import { ProjectSettings } from "./components/ProjectSettings";
+import { Burndown } from "./components/Burndown";
+import { BurndownTable } from "./components/BurndownTable";
 import { Timeline } from "./components/Timeline";
 import { TimelineTable } from "./components/TimelineTable";
 import type { Project, Retrospective, Scope, Sprint } from "./types";
@@ -260,6 +262,50 @@ function RetrospectiveView({
                 axis={data.axis ?? []}
                 compressed={compressed}
               />
+            )}
+          </section>
+
+          <section className="card" style={{ padding: 16 }}>
+            <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
+              <strong className="small">Burndown</strong>
+              <div className="legend" aria-label="Burndown series">
+                <span className="legend-item">
+                  <span
+                    className="swatch"
+                    style={{ background: "var(--state-in-progress)" }}
+                    aria-hidden="true"
+                  />
+                  Points remaining
+                </span>
+                <span className="legend-item">
+                  <span
+                    className="swatch"
+                    style={{
+                      background: "transparent",
+                      borderTop: "2px dashed var(--text-muted)",
+                      height: 0,
+                      borderRadius: 0,
+                    }}
+                    aria-hidden="true"
+                  />
+                  Ideal, working hours only
+                </span>
+              </div>
+            </div>
+            {asTable ? (
+              <BurndownTable burndown={data.burndown} />
+            ) : (
+              <Burndown
+                burndown={data.burndown}
+                sprint={data.sprint}
+                axis={data.axis ?? []}
+                compressed={compressed}
+              />
+            )}
+            {data.burndown.unestimated.length > 0 && (
+              <p className="small muted" style={{ margin: "10px 0 0" }}>
+                Not counted, no estimate: {data.burndown.unestimated.join(", ")}
+              </p>
             )}
           </section>
 

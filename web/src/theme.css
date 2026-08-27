@@ -44,6 +44,12 @@
   --gridline: #e1e0d9;
   --border: #e1e0d9;
 
+  /* Off-hours bands. A shade off the surface in each mode, in
+     whichever direction is subtler there: --plane was standing in
+     for this and is darker than the surface in dark mode, which
+     turned quiet nights into black stripes. */
+  --offhours: #f1f0ec;
+
   --state-to-do: #7d7b75;
   --state-in-progress: #2a78d6;
   --state-review-requested: #a02fd8;
@@ -66,6 +72,7 @@
     --text-muted: #898781;
     --gridline: #2c2c2a;
     --border: #2c2c2a;
+    --offhours: #232321;
 
     --state-to-do: #8b8983;
     --state-in-progress: #3987e5;
@@ -89,6 +96,7 @@
   --text-muted: #898781;
   --gridline: #2c2c2a;
   --border: #2c2c2a;
+  --offhours: #232321;
 
   --state-to-do: #8b8983;
   --state-in-progress: #3987e5;

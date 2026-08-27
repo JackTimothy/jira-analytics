@@ -61,11 +61,24 @@ export interface AxisSegment {
   kind: AxisSegmentKind;
 }
 
+export interface BurndownPoint {
+  at: string;
+  remaining: number;
+}
+
+export interface Burndown {
+  total: number;
+  remaining: BurndownPoint[];
+  ideal: BurndownPoint[];
+  unestimated: string[];
+}
+
 export interface Retrospective {
   sprint: Sprint;
   parents: Parent[];
   warnings: string[];
   axis: AxisSegment[];
+  burndown: Burndown;
 }
 
 export type Scope = "all" | "committed";

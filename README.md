@@ -15,6 +15,32 @@ the sprint and only those in the committed scope. A parent with no rows to show
 is left out entirely — a header over empty space says nothing about how the
 sprint went.
 
+### The burndown
+
+The same sprint measured in points rather than in states. It is built from the
+parent work items, because estimates live there — a burndown assembled from
+sub-tasks would be assembled from nothing — and it follows the same scope
+toggle, so switching between all work and the committed scope moves both charts.
+
+Points come off when a work item's own status reaches a done category. Finished
+is modelled as a state over time rather than as one timestamp, so an item that
+is reopened puts its points back on the chart and takes them off again when it
+finishes for good. Work carried over already finished when the sprint opened
+counts toward the total but never toward what was left to do.
+
+The ideal line descends only during working hours, flat across nights and
+weekends, from the same schedule the timeline's axis uses. A calendar-time ideal
+shows a team falling behind every Saturday and catching up every Monday, which
+says nothing about them. On the compressed axis it is a straight line, which is
+the same fact seen from the other side.
+
+Items with no estimate are named under the chart rather than silently counting
+as zero: a burndown quietly missing a third of a sprint is worse than none.
+
+The scope line is flat at the sprint's final total. Work added mid-sprint is
+therefore counted from the start, which a stepped scope line read from the
+sprint field's own history would fix.
+
 ### The seven states
 
 | State | Meaning |
@@ -235,6 +261,7 @@ working but expensive fallback:
 | Sprint fetched by id from the Agile API | Scan the project's issues | One request per hundred issues, per retrospective |
 | Changelogs attached to the issue search | One request per sub-task | Fifty to seventy requests, per retrospective |
 | Pull request detail batched over GraphQL | Three REST requests per pull request | About a hundred requests, per retrospective |
+| Story points read from the discovered estimate field | No burndown | The points view is absent, and the log says so |
 
 Every fallback is announced in the log the first time it is taken. A silent
 fallback is the worse failure: every build would quietly pay for it and nothing

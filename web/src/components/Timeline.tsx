@@ -187,7 +187,7 @@ export function Timeline({
                     y={AXIS_HEIGHT - 6}
                     width={segment.width}
                     height={totalHeight - AXIS_HEIGHT + 6}
-                    fill="var(--plane)"
+                    fill="var(--offhours)"
                   />
                   <line
                     x1={segment.x}
