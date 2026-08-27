@@ -225,6 +225,20 @@ button { font: inherit; color: inherit; cursor: pointer; }
 
 .field { display: flex; flex-direction: column; gap: 6px; max-width: 320px; }
 
+/* The row filter. Sized to hold an issue key and a word or two without
+   growing the card header; `type="search"` supplies the clear affordance, and
+   it renders correctly in both palettes because color-scheme is set on both. */
+.search {
+  font: inherit;
+  width: 260px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-primary);
+}
+
 .field select, .field input {
   font: inherit; padding: 7px 9px; border-radius: 7px;
   border: 1px solid var(--border); background: var(--surface); color: var(--text-primary);

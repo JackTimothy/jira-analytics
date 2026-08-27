@@ -116,6 +116,26 @@ Due dates are calendar days and sprints end at an instant, so the comparison
 resolves the sprint end to the day it falls on **in the project's timezone**.
 Without that, every sprint ending near midnight UTC is misclassified.
 
+### Filtering rows
+
+The box at the top of the chart hides rows that do not match what you type. It
+filters the retrospective already in hand, so it issues no request and the
+charts never flash through a loading state — the other two ways of narrowing
+the view, Committed scope and `typesLast`, are both configured rather than
+typed, and neither answers "show me the picker work".
+
+Every term must match, so `picker api` narrows rather than widens. A work item
+matches on its key, summary or issue type — `support` selects the Support
+tickets — and **a matched work item keeps all of its rows**, since typing an
+issue key should show that item rather than a heading over nothing. Otherwise
+each row is matched on its own text together with its parent's, so `PROJ-1 api`
+finds one row inside one work item. Escape clears the box.
+
+**The burndown does not follow the filter**, and says so while one is active.
+It cannot: the API sends sprint-level series with no per-item points to rebuild
+a narrowed curve from, and moving that arithmetic into the client would take
+the burndown out of the domain layer where it is tested.
+
 ## Running it
 
 ### Prerequisites

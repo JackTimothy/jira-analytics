@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api } from "./api";
+import { filterParents } from "./filter";
 import { Legend } from "./components/Legend";
 import { ProjectSettings } from "./components/ProjectSettings";
 import { Burndown } from "./components/Burndown";
@@ -224,6 +225,10 @@ function RetrospectiveView({
 }) {
   const [scope, setScope] = useState<Scope>("all");
   const [asTable, setAsTable] = useState(false);
+  // The row filter. Deliberately absent from the fetch deps below: filtering
+  // happens in the browser over the retrospective already in hand, so typing
+  // never issues a request and the charts never flash through loading.
+  const [query, setQuery] = useState("");
   // Compressed by default: nights and weekends collapse to narrow bands so
   // working hours get the space. Linear is one click away for judging real
   // elapsed time.
@@ -233,6 +238,13 @@ function RetrospectiveView({
     () => api.retrospective(project.id, sprint.id, scope),
     [project.id, sprint.id, scope],
   );
+
+  const parents = data?.parents;
+  const filtered = useMemo(
+    () => (parents ? filterParents(parents, query) : []),
+    [parents, query],
+  );
+  const filtering = query.trim().length > 0;
 
   return (
     <>
@@ -298,11 +310,37 @@ function RetrospectiveView({
         <div className="stack">
           <Legend />
           <section className="card" style={{ padding: 16 }}>
-            {asTable ? (
-              <TimelineTable parents={data.parents} />
+            <div className="row" style={{ justifyContent: "space-between", marginBottom: 12 }}>
+              <input
+                className="search"
+                type="search"
+                value={query}
+                placeholder="Filter rows…"
+                aria-label="Filter work items and rows"
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") setQuery("");
+                }}
+              />
+              {filtering && (
+                <span className="muted small" role="status">
+                  {filtered.length} of {data.parents.length} work items
+                </span>
+              )}
+            </div>
+
+            {filtering && filtered.length === 0 ? (
+              <p className="muted">
+                Nothing matches “{query.trim()}”.{" "}
+                <button className="link-button" onClick={() => setQuery("")}>
+                  Clear the filter
+                </button>
+              </p>
+            ) : asTable ? (
+              <TimelineTable parents={filtered} />
             ) : (
               <Timeline
-                parents={data.parents}
+                parents={filtered}
                 sprint={data.sprint}
                 axis={data.axis ?? []}
                 compressed={compressed}
@@ -346,6 +384,11 @@ function RetrospectiveView({
                 axis={data.axis ?? []}
                 compressed={compressed}
               />
+            )}
+            {filtering && (
+              <p className="small muted" style={{ margin: "10px 0 0" }}>
+                The filter narrows the timeline only — the burndown covers the whole scope.
+              </p>
             )}
             {data.burndown.unestimated.length > 0 && (
               <p className="small muted" style={{ margin: "10px 0 0" }}>
