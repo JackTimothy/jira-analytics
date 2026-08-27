@@ -153,12 +153,26 @@ Point `ENV_FILE` elsewhere to read a different file. Optional settings: `PORT`
 ### Run
 
 ```sh
-(cd web && npm install && npm run build)   # or `npm run dev` for a live client
-go run ./cmd/server
+make run          # build the client if it is stale, then serve on :8080
+make dev          # the same, with the client on Vite and hot reload
+make test         # go test -race, go vet, gofmt, and the client typecheck
+make help         # everything else
 ```
 
-Then open <http://localhost:8080>. In development, `npm run dev` serves the
-client on Vite's port and proxies the API to `localhost:8080`.
+Then open <http://localhost:8080>.
+
+`run` depends on the built client, and the built client depends on its sources.
+That is the point of the Makefile rather than a convenience: the server serves
+`web/dist`, which is gitignored, so pulling a change updates the source and
+leaves the bundle the browser actually receives untouched — which looks exactly
+like a change that did not work.
+
+Everything is still one command away without `make`, if you would rather:
+
+```sh
+(cd web && npm install && npm run build)
+go run ./cmd/server
+```
 
 ## API
 
