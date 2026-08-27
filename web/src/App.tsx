@@ -6,6 +6,7 @@ import { ProjectSettings } from "./components/ProjectSettings";
 import { Burndown } from "./components/Burndown";
 import { BurndownTable } from "./components/BurndownTable";
 import { Timeline } from "./components/Timeline";
+import { ThemeToggle } from "./components/ThemeToggle";
 import { TimelineTable } from "./components/TimelineTable";
 import type { Project, Retrospective, Scope, Sprint } from "./types";
 
@@ -19,11 +20,17 @@ export function App() {
 
   return (
     <main className="app">
-      <header className="stack" style={{ marginBottom: 20 }}>
-        <h1 style={{ fontSize: 22 }}>Delivery Analytics</h1>
-        <p className="muted small" style={{ margin: 0 }}>
-          Sprint retrospectives assembled from your issue tracker and code host.
-        </p>
+      <header
+        className="row"
+        style={{ justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}
+      >
+        <div className="stack">
+          <h1 style={{ fontSize: 22 }}>Delivery Analytics</h1>
+          <p className="muted small" style={{ margin: 0 }}>
+            Sprint retrospectives assembled from your issue tracker and code host.
+          </p>
+        </div>
+        <ThemeToggle />
       </header>
 
       {view.name === "projects" && (

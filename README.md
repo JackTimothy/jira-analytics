@@ -251,6 +251,14 @@ table view all name the state — but a colourblind-safe palette means giving up
 hue separation somewhere, and that is a deliberate revisit rather than an
 oversight.
 
+Both palettes ship. The header carries a **System / Light / Dark** control:
+System, the default, follows the operating system's own light/dark setting, and
+the other two override it. The choice is remembered per browser and re-applied
+before the first paint, so a forced theme never flashes the other one on the way
+in. System is a first-class option rather than the absence of a choice — a
+two-state toggle would strand a reader whose machine switches theme in the
+evening on whichever side they last pressed.
+
 ### Which sprints appear
 
 Sprints are read from the project's own issues, not from a board. A board's

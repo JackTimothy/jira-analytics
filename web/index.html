@@ -4,6 +4,20 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Delivery Analytics</title>
+    <script>
+      // Apply the stored theme before the first paint. The module bundle below
+      // is deferred, so without this the page paints in the system theme and
+      // then flips to the chosen one. The key matches THEME_STORAGE_KEY in
+      // src/theme.ts; the absence of the attribute means "follow the system".
+      try {
+        var choice = localStorage.getItem("delivery-analytics.theme");
+        if (choice === "light" || choice === "dark") {
+          document.documentElement.setAttribute("data-theme", choice);
+        }
+      } catch (denied) {
+        // Site data blocked. The system theme is the honest fallback.
+      }
+    </script>
   </head>
   <body>
     <div id="root"></div>
