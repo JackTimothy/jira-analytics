@@ -8,12 +8,14 @@ package domain
 //
 //   - Blocked outranks every code-host-derived state, so work someone flagged
 //     as blocked stays visible even while its pull request is open.
+//   - Done means merged with nothing left open, not merely merged. See
+//     Facts.Delivered.
 //   - Approved is tested before Review Requested, and both before In Progress.
 //     A code host drops a reviewer from the "requested" list once they submit,
 //     so a "nobody is requested" test placed earlier would misread every fully
 //     reviewed pull request as still in progress.
 func Derive(f *Facts) State {
-	if f.Status.IsDone() || f.AnyMerged() {
+	if f.Status.IsDone() || f.Delivered() {
 		return StateDone
 	}
 	if f.Status.IsBlocked() {

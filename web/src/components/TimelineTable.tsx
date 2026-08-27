@@ -13,7 +13,7 @@ export function TimelineTable({ parents }: { parents: Parent[] }) {
         <thead>
           <tr>
             <th scope="col">Parent</th>
-            <th scope="col">Sub-task</th>
+            <th scope="col">Row</th>
             <th scope="col">State</th>
             <th scope="col">From</th>
             <th scope="col">To</th>
@@ -21,11 +21,11 @@ export function TimelineTable({ parents }: { parents: Parent[] }) {
         </thead>
         <tbody>
           {parents.flatMap((parent) =>
-            parent.subtasks.flatMap((subTask) =>
-              subTask.intervals.map((interval, index) => (
-                <tr key={`${subTask.key}-${index}`}>
+            parent.rows.flatMap((row, rowIndex) =>
+              row.intervals.map((interval, index) => (
+                <tr key={`${parent.key}-${rowIndex}-${index}`}>
                   <td>{index === 0 ? parent.key : ""}</td>
-                  <td>{index === 0 ? subTask.key : ""}</td>
+                  <td>{index === 0 ? (row.kind === "BRANCH" ? row.label : row.key) : ""}</td>
                   <td>
                     <span className="row" style={{ gap: 6 }}>
                       <span

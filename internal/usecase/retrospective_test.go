@@ -56,12 +56,12 @@ func TestBuildGroupsSubTasksByParent(t *testing.T) {
 	if len(result.Groups) != 2 {
 		t.Fatalf("got %d groups, want 2", len(result.Groups))
 	}
-	if result.Groups[0].Parent.Key != "PROJ-1" || len(result.Groups[0].SubTasks) != 2 {
-		t.Errorf("first group = %s with %d sub-tasks", result.Groups[0].Parent.Key, len(result.Groups[0].SubTasks))
+	if result.Groups[0].Parent.Key != "PROJ-1" || len(result.Groups[0].Rows) != 2 {
+		t.Errorf("first group = %s with %d sub-tasks", result.Groups[0].Parent.Key, len(result.Groups[0].Rows))
 	}
 	// Sub-tasks are ordered by key, not by the tracker's arbitrary order.
-	if result.Groups[0].SubTasks[0].SubTask.Key != "PROJ-10" {
-		t.Errorf("sub-tasks not ordered by key: %s first", result.Groups[0].SubTasks[0].SubTask.Key)
+	if result.Groups[0].Rows[0].Key != "PROJ-10" {
+		t.Errorf("sub-tasks not ordered by key: %s first", result.Groups[0].Rows[0].Key)
 	}
 	if !result.Groups[0].InScope {
 		t.Error("PROJ-1 due on the sprint end should be in scope")
@@ -119,9 +119,9 @@ func TestBuildDerivesTimelineFromCombinedTrackerAndCodeEvents(t *testing.T) {
 	}
 
 	// PROJ-11: To Do until its branch appears, In Progress until merge, Done after.
-	var api domain.SubTaskTimeline
-	for _, timeline := range result.Groups[0].SubTasks {
-		if timeline.SubTask.Key == "PROJ-11" {
+	var api domain.Row
+	for _, timeline := range result.Groups[0].Rows {
+		if timeline.Key == "PROJ-11" {
 			api = timeline
 		}
 	}
@@ -171,8 +171,8 @@ func TestBuildWarnsAboutSubTasksCreatedAfterTheSprint(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
-	for _, timeline := range result.Groups[0].SubTasks {
-		if timeline.SubTask.Key == "PROJ-99" {
+	for _, timeline := range result.Groups[0].Rows {
+		if timeline.Key == "PROJ-99" {
 			t.Fatal("a sub-task created after the sprint should not be charted")
 		}
 	}
@@ -209,7 +209,7 @@ func TestBuildUsesTheEarliestChangeToRecoverTheOpeningStatus(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
-	intervals := result.Groups[0].SubTasks[0].Intervals
+	intervals := result.Groups[0].Rows[0].Intervals
 	if intervals[0].State != domain.StateToDo {
 		t.Errorf("first interval = %s, want TO_DO", intervals[0].State)
 	}
@@ -246,7 +246,10 @@ func TestBuildRejectsAnInvalidProjectTimezone(t *testing.T) {
 	}
 }
 
-func TestBuildExcludesParentsWithNothingToChart(t *testing.T) {
+// A sprint with no sub-tasks anywhere is not an empty sprint. It is the whole
+// shape of a team that does not break work down, and every work item in it is
+// charted directly — the case this used to return nothing at all for.
+func TestBuildChartsASprintThatHasNoSubTasksAtAll(t *testing.T) {
 	projects, tracker, code := buildFixture()
 	tracker.subTasks = nil
 
@@ -255,8 +258,13 @@ func TestBuildExcludesParentsWithNothingToChart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if len(result.Groups) != 0 {
-		t.Fatalf("got %d groups, want none — a parent with no rows is a header over empty space", len(result.Groups))
+	if len(result.Groups) != len(tracker.parents) {
+		t.Fatalf("got %d groups, want one per work item", len(result.Groups))
+	}
+	for _, group := range result.Groups {
+		if len(group.Rows) != 1 || group.Rows[0].Kind != domain.RowWorkItem {
+			t.Errorf("%s has %+v, want one work-item row", group.Parent.Key, group.Rows)
+		}
 	}
 	// The frame still comes back so the chart can render its axis.
 	if len(result.Axis) == 0 {
@@ -264,7 +272,10 @@ func TestBuildExcludesParentsWithNothingToChart(t *testing.T) {
 	}
 }
 
-func TestBuildKeepsParentsThatDoHaveRows(t *testing.T) {
+// A work item nobody broke down is charted in its own right, which is the whole
+// sprint for a team that does not use sub-tasks. One that does have sub-tasks is
+// still a header over them, and the two can sit in the same chart.
+func TestBuildChartsWorkItemsWithNoSubTasksAsTheirOwnRows(t *testing.T) {
 	projects, tracker, code := buildFixture()
 	// PROJ-2 keeps its sub-task; PROJ-1 loses both of its.
 	tracker.subTasks = []domain.SubTask{
@@ -276,11 +287,26 @@ func TestBuildKeepsParentsThatDoHaveRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if len(result.Groups) != 1 {
-		t.Fatalf("got %d groups, want only the parent with rows", len(result.Groups))
+	if len(result.Groups) != 2 {
+		t.Fatalf("got %d groups, want both work items charted", len(result.Groups))
 	}
-	if result.Groups[0].Parent.Key != "PROJ-2" {
-		t.Errorf("kept %s, want PROJ-2", result.Groups[0].Parent.Key)
+
+	byKey := map[domain.IssueKey]domain.ParentGroup{}
+	for _, group := range result.Groups {
+		byKey[group.Parent.Key] = group
+	}
+
+	leaf := byKey["PROJ-1"].Rows
+	if len(leaf) != 1 || leaf[0].Kind != domain.RowWorkItem {
+		t.Errorf("PROJ-1 has %d rows %+v, want one charting the work item itself", len(leaf), leaf)
+	}
+	if leaf[0].Key != "PROJ-1" || leaf[0].Label != "Committed story" {
+		t.Errorf("the work item row is labelled %s/%q", leaf[0].Key, leaf[0].Label)
+	}
+
+	nested := byKey["PROJ-2"].Rows
+	if len(nested) != 1 || nested[0].Kind != domain.RowSubTask || nested[0].Key != "PROJ-20" {
+		t.Errorf("PROJ-2 has %+v, want its sub-task row", nested)
 	}
 }
 
@@ -297,8 +323,13 @@ func TestBuildExcludesAParentWhoseOnlySubTaskWasSkipped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build: %v", err)
 	}
-	if len(result.Groups) != 0 {
-		t.Fatalf("got %d groups, want none", len(result.Groups))
+	// PROJ-1's only sub-task was skipped, so it has nothing to chart. PROJ-2
+	// has no sub-tasks at all and is charted in its own right, so the guard has
+	// to be about surviving rows rather than about reported sub-tasks.
+	for _, group := range result.Groups {
+		if group.Parent.Key == "PROJ-1" {
+			t.Errorf("PROJ-1 was charted with %+v, want it excluded", group.Rows)
+		}
 	}
 	// The warning still stands: the reader should know why it is absent.
 	var warned bool
@@ -328,8 +359,8 @@ func TestBuildIgnoresSubTasksWhoseParentIsNotInTheSelectedScope(t *testing.T) {
 	}
 
 	for _, group := range result.Groups {
-		for _, timeline := range group.SubTasks {
-			if timeline.SubTask.Key == "PROJ-90" {
+		for _, timeline := range group.Rows {
+			if timeline.Key == "PROJ-90" {
 				t.Fatal("a sub-task from an unselected parent was charted")
 			}
 		}
@@ -382,5 +413,126 @@ func TestBuildIncludesTheCompressedAxis(t *testing.T) {
 	}
 	if !kinds[domain.SegmentWorking] || !kinds[domain.SegmentOffHours] {
 		t.Errorf("axis has kinds %v, want both working and off-hours", kinds)
+	}
+}
+
+// The undisciplined case: several branches on one work item. Charting them as
+// one bar would mean a bar holding two review states at once, so each gets a
+// row — and the team gets told, because the split makes the chart honest but
+// the branches are still a problem.
+func TestBuildSplitsAWorkItemAcrossItsBranches(t *testing.T) {
+	projects, tracker, code := buildFixture()
+	tracker.subTasks = nil
+	tracker.parents = tracker.parents[:1] // PROJ-1 only
+	code.events = map[domain.IssueKey][]domain.Event{
+		"PROJ-1": {
+			domain.BranchFirstSeen{At: ts(5, 9), Name: "org/repo:PROJ-1-api"},
+			domain.PROpened{At: ts(6, 9), PR: domain.PRKey{Repo: "org/repo", Number: 1}, Branch: "org/repo:PROJ-1-api"},
+			domain.BranchFirstSeen{At: ts(7, 9), Name: "org/repo:PROJ-1-ui"},
+			domain.PROpened{At: ts(8, 9), PR: domain.PRKey{Repo: "org/repo", Number: 2}, Branch: "org/repo:PROJ-1-ui"},
+			domain.PRMerged{At: ts(9, 9), PR: domain.PRKey{Repo: "org/repo", Number: 1}},
+		},
+	}
+
+	result, err := NewRetrospective(projects, tracker, code).
+		Build(context.Background(), RetrospectiveRequest{ProjectID: "activation", SprintID: "100", Scope: domain.ScopeAll})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(result.Groups) != 1 {
+		t.Fatalf("got %d groups, want 1", len(result.Groups))
+	}
+
+	rows := result.Groups[0].Rows
+	if len(rows) != 2 {
+		t.Fatalf("got %d rows %+v, want one per branch", len(rows), rows)
+	}
+	for _, row := range rows {
+		if row.Kind != domain.RowBranch {
+			t.Errorf("row %s is %s, want a branch row", row.Label, row.Kind)
+		}
+		if row.Key != "PROJ-1" {
+			t.Errorf("row %s belongs to %s, want the work item", row.Label, row.Key)
+		}
+	}
+	if rows[0].Label != "org/repo:PROJ-1-api" || rows[1].Label != "org/repo:PROJ-1-ui" {
+		t.Errorf("rows are labelled %q and %q, want the branch names in order", rows[0].Label, rows[1].Label)
+	}
+
+	var warned bool
+	for _, warning := range result.Warnings {
+		if strings.Contains(warning, "PROJ-1") && strings.Contains(warning, "2 branches") {
+			warned = true
+		}
+	}
+	if !warned {
+		t.Errorf("nothing warned about the split: %v", result.Warnings)
+	}
+}
+
+// The ordinary case must not change: one branch is one row, whatever kind.
+func TestBuildLeavesASingleBranchAsOneRow(t *testing.T) {
+	projects, tracker, code := buildFixture()
+
+	result, err := NewRetrospective(projects, tracker, code).
+		Build(context.Background(), RetrospectiveRequest{ProjectID: "activation", SprintID: "100", Scope: domain.ScopeAll})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	for _, group := range result.Groups {
+		for _, row := range group.Rows {
+			if row.Kind == domain.RowBranch {
+				t.Errorf("%s was split across branches when it has one: %s", group.Parent.Key, row.Label)
+			}
+		}
+	}
+}
+
+// Which issue types belong at the bottom is a fact about a team's process, so
+// it comes from the project rather than from a rule in the code.
+func TestBuildSortsConfiguredIssueTypesLast(t *testing.T) {
+	projects, tracker, code := buildFixture()
+	tracker.subTasks = nil
+	tracker.parents = []domain.WorkItem{
+		{Key: "PROJ-1", Summary: "Support one", Type: "Support", Created: ts(1, 9)},
+		{Key: "PROJ-2", Summary: "A story", Type: "Story", Created: ts(1, 9)},
+		{Key: "PROJ-3", Summary: "Support two", Type: "Support", Created: ts(1, 9)},
+		{Key: "PROJ-4", Summary: "A bug", Type: "Bug", Created: ts(1, 9)},
+	}
+	projects.project.Settings.TypesLast = []string{"support"} // matched case-insensitively
+
+	result, err := NewRetrospective(projects, tracker, code).
+		Build(context.Background(), RetrospectiveRequest{ProjectID: "activation", SprintID: "100", Scope: domain.ScopeAll})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	var order []domain.IssueKey
+	for _, group := range result.Groups {
+		order = append(order, group.Parent.Key)
+	}
+	want := []domain.IssueKey{"PROJ-2", "PROJ-4", "PROJ-1", "PROJ-3"}
+	for i := range want {
+		if i >= len(order) || order[i] != want[i] {
+			t.Fatalf("order = %v, want the Support items last and everything else in tracker order: %v", order, want)
+		}
+	}
+}
+
+func TestBuildLeavesOrderAloneWithNoConfiguredTypes(t *testing.T) {
+	projects, tracker, code := buildFixture()
+	tracker.subTasks = nil
+	tracker.parents = []domain.WorkItem{
+		{Key: "PROJ-1", Summary: "Support", Type: "Support", Created: ts(1, 9)},
+		{Key: "PROJ-2", Summary: "A story", Type: "Story", Created: ts(1, 9)},
+	}
+
+	result, err := NewRetrospective(projects, tracker, code).
+		Build(context.Background(), RetrospectiveRequest{ProjectID: "activation", SprintID: "100", Scope: domain.ScopeAll})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if result.Groups[0].Parent.Key != "PROJ-1" {
+		t.Errorf("order changed with no typesLast configured: %s first", result.Groups[0].Parent.Key)
 	}
 }

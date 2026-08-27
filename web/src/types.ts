@@ -39,18 +39,27 @@ export interface Interval {
   to: string;
 }
 
-export interface SubTask {
+/**
+ * What a charted row stands for. A row was once always a sub-task; teams that
+ * do not break work down chart the work item itself, and a work item that ended
+ * up with several branches gets a row per branch.
+ */
+export type RowKind = "SUB_TASK" | "WORK_ITEM" | "BRANCH";
+
+export interface Row {
+  kind: RowKind;
   key: string;
-  summary: string;
+  label: string;
   intervals: Interval[];
 }
 
 export interface Parent {
   key: string;
   summary: string;
+  type: string;
   dueDate: string | null;
   inScope: boolean;
-  subtasks: SubTask[];
+  rows: Row[];
 }
 
 export type AxisSegmentKind = "WORKING" | "OFF_HOURS";

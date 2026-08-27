@@ -30,6 +30,12 @@ projects:
         start: "08:00"
         end: "18:00"
 
+      # Issue types to sort to the bottom of the chart: a support queue,
+      # chores — whatever a reader scrolls past to reach the work the sprint
+      # was about. Matched by name, case-insensitively. Omit to keep the
+      # tracker's own order.
+      typesLast: [Support]
+
     tracker:
       type: jira
       # Sprints are read from this project's own issues, so the list contains
@@ -37,9 +43,11 @@ projects:
       # happens to share a board.
       projectKey: PROJ
 
-    # One or more repositories. Branches are linked to sub-tasks by the issue
-    # key appearing in the branch name, which is what Jira's "Create branch"
-    # button produces by default.
+    # One or more repositories. Branches are linked to work by the issue key
+    # appearing in the branch name, which is what Jira's "Create branch" button
+    # produces by default. A team that uses sub-tasks gets a row per sub-task;
+    # a team that does not gets a row per work item, and one row per branch
+    # where a work item ended up with several.
     repos:
       - { host: github, owner: your-org, name: your-repo }
 

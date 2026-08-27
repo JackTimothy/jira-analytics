@@ -194,12 +194,38 @@ func TestDerive(t *testing.T) {
 			expect: StateApproved,
 		},
 		{
-			name: "any merged pull request wins even when another is still open",
+			// A merge is not the end while something is still open. The work
+			// item is either spread across branches or has a follow-up fix in
+			// review; in both cases somebody is still waiting on a reviewer.
+			name: "a merge does not finish the work while another pull request is open",
 			facts: factsFrom(statusInProgress,
 				BranchFirstSeen{At: at(1), Name: "b"},
 				PROpened{At: at(2), PR: prOne},
 				PRMerged{At: at(3), PR: prOne},
 				PROpened{At: at(4), PR: prTwo},
+			),
+			expect: StateInProgress,
+		},
+		{
+			// The other half of the same rule: a pull request closed without
+			// merging is abandoned, not outstanding, so it must never keep
+			// finished work looking unfinished.
+			name: "a merge finishes the work when the other pull request was abandoned",
+			facts: factsFrom(statusInProgress,
+				BranchFirstSeen{At: at(1), Name: "b"},
+				PROpened{At: at(2), PR: prOne},
+				PROpened{At: at(3), PR: prTwo},
+				PRClosed{At: at(4), PR: prTwo},
+				PRMerged{At: at(5), PR: prOne},
+			),
+			expect: StateDone,
+		},
+		{
+			name: "a merge finishes the work when it is the only pull request",
+			facts: factsFrom(statusInProgress,
+				BranchFirstSeen{At: at(1), Name: "b"},
+				PROpened{At: at(2), PR: prOne},
+				PRMerged{At: at(3), PR: prOne},
 			),
 			expect: StateDone,
 		},

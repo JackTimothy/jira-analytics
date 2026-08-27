@@ -24,6 +24,12 @@ type WorkItem struct {
 	// Status is what the item holds now. With no recorded transitions it is
 	// the only evidence of whether the item was finished during the sprint.
 	Status IssueStatus
+
+	// Type is the tracker's name for what kind of item this is — Story, Bug,
+	// Support. The domain attaches no meaning to it; it exists so a project can
+	// say which of its own types belong at the bottom of the chart, which is
+	// not something this code could know.
+	Type string
 }
 
 // SubTask is the unit the retrospective charts. It is the only level at which

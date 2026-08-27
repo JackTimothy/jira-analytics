@@ -17,6 +17,16 @@ type ProjectSettings struct {
 	// WorkingHours drives the compressed timeline axis. Nil means the default
 	// schedule; a configured value must validate.
 	WorkingHours *WorkingHours
+
+	// TypesLast names the tracker's issue types that belong at the bottom of
+	// the chart — a support queue, chores, anything a reader scrolls past to
+	// reach the work the sprint was about. Matched against the issue type by
+	// name, case-insensitively.
+	//
+	// It is configuration rather than a rule in the code because which types
+	// those are is a fact about one team's process. Empty leaves the tracker's
+	// own order alone.
+	TypesLast []string
 }
 
 // Schedule resolves the configured working hours, defaulting when unset.

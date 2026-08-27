@@ -9,11 +9,29 @@ company's tracker, repositories or people appears in this repository.
 
 ## The first feature: sprint retrospective timeline
 
-For a chosen sprint, every sub-task gets a row showing the states it occupied
-over time, grouped by parent work item, with a toggle between all sub-tasks in
-the sprint and only those in the committed scope. A parent with no rows to show
-is left out entirely — a header over empty space says nothing about how the
-sprint went.
+For a chosen sprint, every piece of work gets a row showing the states it
+occupied over time, grouped by work item, with a toggle between all the work in
+the sprint and only what was in the committed scope.
+
+What a row is depends on how a team works, and both shapes can appear in one
+chart:
+
+- **A sub-task**, where the team breaks work down. The work item above is a
+  header.
+- **The work item itself**, where nobody broke it down. The heading carries the
+  bar; there is nothing to nest under it.
+- **One branch**, where a work item ended up with several. One bar cannot hold
+  two review states at once, so each branch gets a row and a warning names the
+  item — the split makes the chart honest, but the branches are still a
+  discipline problem.
+
+A work item with no rows at all is left out: that now means only one whose rows
+all fell outside the sprint window.
+
+Issue types listed in a project's `typesLast` sort to the bottom — a support
+queue, chores, whatever a reader scrolls past to reach the work the sprint was
+about. Which types those are is a fact about one team's process, so it is
+configuration rather than a rule in the code.
 
 ### The burndown
 
@@ -51,10 +69,17 @@ sprint field's own history would fix.
 | **Feedback Given** | At least one human reviewer has commented or requested changes |
 | **Approved** | Every human reviewer has approved |
 | **Blocked** | The tracker status says Blocked |
-| **Done** | The tracker status is terminal, or a linked pull request merged |
+| **Done** | The tracker status is terminal, or something merged and no pull request is still open |
 
 Precedence is explicit and ordered: **Done → Blocked → Approved → Feedback Given
 → Review Requested → In Progress → To Do**. First match wins.
+
+Done means merged *and nothing still outstanding*, not merely merged. A work
+item spread across branches would otherwise end its bar at the first merge while
+the rest were still in review, and a sub-task whose follow-up fix is open would
+read as finished while somebody waits on a reviewer. A pull request closed
+without merging is abandoned rather than outstanding, so giving up on a
+superseded attempt never keeps finished work looking unfinished.
 
 Two orderings are load-bearing rather than stylistic:
 

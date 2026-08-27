@@ -209,9 +209,9 @@ func TestBurndownFollowsTheScopeToggle(t *testing.T) {
 	}
 }
 
-// The timeline drops a work item with nothing to chart. The burndown must not:
-// a story with no sub-tasks still carries points and still has to be finished.
-func TestBurndownKeepsWorkItemsTheTimelineDrops(t *testing.T) {
+// A story nobody broke down carries points and has to be finished, so it counts
+// toward the burndown — and is now charted in its own right besides.
+func TestBurndownCountsWorkItemsWithNoSubTasks(t *testing.T) {
 	projects, tracker, code := buildFixture()
 	tracker.parents = append(tracker.parents, domain.WorkItem{
 		Key: "PROJ-3", Summary: "Committed but never broken down",
@@ -225,10 +225,17 @@ func TestBurndownKeepsWorkItemsTheTimelineDrops(t *testing.T) {
 		t.Fatalf("Build: %v", err)
 	}
 
+	var charted bool
 	for _, group := range result.Groups {
 		if group.Parent.Key == "PROJ-3" {
-			t.Error("a parent with no sub-tasks reached the timeline")
+			charted = true
+			if len(group.Rows) != 1 || group.Rows[0].Kind != domain.RowWorkItem {
+				t.Errorf("PROJ-3 has %+v, want one work-item row", group.Rows)
+			}
 		}
+	}
+	if !charted {
+		t.Error("the un-broken-down story is missing from the timeline")
 	}
 	if result.Burndown.Total != 13 {
 		t.Errorf("burndown total = %v, want 13 — the un-broken-down story still counts",

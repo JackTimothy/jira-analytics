@@ -187,16 +187,21 @@ func presentAxis(segments []domain.AxisSegment) []axisSegmentView {
 }
 
 type parentView struct {
-	Key      string        `json:"key"`
-	Summary  string        `json:"summary"`
-	DueDate  *string       `json:"dueDate"`
-	InScope  bool          `json:"inScope"`
-	SubTasks []subTaskView `json:"subtasks"`
+	Key     string    `json:"key"`
+	Summary string    `json:"summary"`
+	Type    string    `json:"type"`
+	DueDate *string   `json:"dueDate"`
+	InScope bool      `json:"inScope"`
+	Rows    []rowView `json:"rows"`
 }
 
-type subTaskView struct {
+// rowView is one charted line. Kind says what it stands for: a sub-task, the
+// work item itself where nobody broke it down, or one branch of a work item
+// that has several.
+type rowView struct {
+	Kind      string         `json:"kind"`
 	Key       string         `json:"key"`
-	Summary   string         `json:"summary"`
+	Label     string         `json:"label"`
 	Intervals []intervalView `json:"intervals"`
 }
 
@@ -215,29 +220,31 @@ func presentRetrospective(r domain.Retrospective) retrospectiveView {
 			due = &formatted
 		}
 
-		subTasks := make([]subTaskView, 0, len(group.SubTasks))
-		for _, timeline := range group.SubTasks {
-			intervals := make([]intervalView, 0, len(timeline.Intervals))
-			for _, interval := range timeline.Intervals {
+		rows := make([]rowView, 0, len(group.Rows))
+		for _, row := range group.Rows {
+			intervals := make([]intervalView, 0, len(row.Intervals))
+			for _, interval := range row.Intervals {
 				intervals = append(intervals, intervalView{
 					State: interval.State.String(),
 					From:  interval.From,
 					To:    interval.To,
 				})
 			}
-			subTasks = append(subTasks, subTaskView{
-				Key:       string(timeline.SubTask.Key),
-				Summary:   timeline.SubTask.Summary,
+			rows = append(rows, rowView{
+				Kind:      row.Kind.String(),
+				Key:       string(row.Key),
+				Label:     row.Label,
 				Intervals: intervals,
 			})
 		}
 
 		parents = append(parents, parentView{
-			Key:      string(group.Parent.Key),
-			Summary:  group.Parent.Summary,
-			DueDate:  due,
-			InScope:  group.InScope,
-			SubTasks: subTasks,
+			Key:     string(group.Parent.Key),
+			Summary: group.Parent.Summary,
+			Type:    group.Parent.Type,
+			DueDate: due,
+			InScope: group.InScope,
+			Rows:    rows,
 		})
 	}
 

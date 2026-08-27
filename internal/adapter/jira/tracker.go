@@ -540,6 +540,7 @@ func (i issueJSON) toWorkItem() (domain.WorkItem, error) {
 		DueDate: due,
 		Created: created,
 		Status:  i.Fields.Status.toDomain(),
+		Type:    i.Fields.IssueType.Name,
 	}, nil
 }
 

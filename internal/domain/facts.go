@@ -101,6 +101,19 @@ func (f *Facts) AnyMerged() bool {
 	return false
 }
 
+// Delivered reports that something merged and nothing is still outstanding.
+//
+// "Something merged" alone is not enough. A work item worked on across several
+// branches would end its bar at the first merge while the rest were still in
+// review, and a sub-task whose follow-up fix is open would read as finished
+// while somebody is still waiting on a reviewer. Requiring that no pull request
+// remains open is what makes both cases honest.
+//
+// A pull request that was closed without merging does not count as outstanding,
+// so abandoning a superseded attempt never keeps finished work looking
+// unfinished.
+func (f *Facts) Delivered() bool { return f.AnyMerged() && f.ActivePR() == nil }
+
 // ActivePR returns the most recently opened pull request that is still open.
 // Sub-tasks routinely accumulate superseded and reopened PRs, so "the" PR has
 // to be chosen rather than assumed. Ties break on number to keep the result

@@ -37,7 +37,9 @@ import (
 // PROJ-3 carried over from an earlier sprint and keeps its original due date,
 // so it must still count as committed.
 var jiraRoutes = map[string]string{
-	"/rest/api/3/field": `[{"id":"customfield_10020","schema":{"custom":"com.pyxis.greenhopper.jira:gh-sprint"}}]`,
+	"/rest/api/3/field": `[
+		{"id":"customfield_10020","name":"Sprint","schema":{"custom":"com.pyxis.greenhopper.jira:gh-sprint"}},
+		{"id":"customfield_10059","name":"Story Points","schema":{"custom":"com.pyxis.greenhopper.jira:gh-story-points"}}]`,
 
 	"/rest/api/3/status": `[
 		{"id":"10039","name":"To Do","statusCategory":{"key":"new"}},
@@ -67,18 +69,25 @@ const sprintScanResponse = `{"issues":[
 		{"id":7354,"name":"Sprint 26-31","state":"closed",
 		 "startDate":"2026-08-03T13:00:00.000Z","endDate":"2026-08-17T18:00:00.000Z"}]}}]}`
 
+// Issue types and estimates are here because both matter to the chart now: the
+// estimate drives the burndown, and the type is what a project's typesLast
+// setting sorts on.
 const sprintParentsResponse = `{"issues":[
 	{"key":"PROJ-1","fields":{"summary":"Committed story","duedate":"2026-08-17",
-	 "created":"2026-07-27T14:16:31.828-0400","issuetype":{"subtask":false},
+	 "created":"2026-07-27T14:16:31.828-0400","issuetype":{"subtask":false,"name":"Story"},
+	 "customfield_10059":5,
 	 "status":{"id":"10009","name":"Review","statusCategory":{"key":"indeterminate"}}}},
 	{"key":"PROJ-2","fields":{"summary":"Pulled in mid-sprint","duedate":null,
-	 "created":"2026-08-05T09:00:00.000-0400","issuetype":{"subtask":false},
+	 "created":"2026-08-05T09:00:00.000-0400","issuetype":{"subtask":false,"name":"Support"},
+	 "customfield_10059":2,
 	 "status":{"id":"3","name":"In Progress","statusCategory":{"key":"indeterminate"}}}},
 	{"key":"PROJ-3","fields":{"summary":"Carried over","duedate":"2026-08-03",
-	 "created":"2026-07-10T09:00:00.000-0400","issuetype":{"subtask":false},
+	 "created":"2026-07-10T09:00:00.000-0400","issuetype":{"subtask":false,"name":"Bug"},
+	 "customfield_10059":3,
 	 "status":{"id":"3","name":"In Progress","statusCategory":{"key":"indeterminate"}}}},
 	{"key":"PROJ-4","fields":{"summary":"Committed but never broken down","duedate":"2026-08-17",
-	 "created":"2026-07-10T09:00:00.000-0400","issuetype":{"subtask":false},
+	 "created":"2026-07-10T09:00:00.000-0400","issuetype":{"subtask":false,"name":"Task"},
+	 "customfield_10059":8,
 	 "status":{"id":"10039","name":"To Do","statusCategory":{"key":"new"}}}}]}`
 
 const subTasksResponse = `{"issues":[
@@ -106,13 +115,8 @@ func jqlOf(body []byte) string {
 	return request.JQL
 }
 
-func routeJQL(body []byte) (string, bool) {
-	var request struct {
-		JQL string `json:"jql"`
-	}
-	if err := json.Unmarshal(body, &request); err != nil {
-		return "", false
-	}
+func routeJQL(jql string) (string, bool) {
+	request := struct{ JQL string }{JQL: jql}
 	switch {
 	case strings.Contains(request.JQL, "sprint IS NOT EMPTY"):
 		return sprintScanResponse, true
@@ -170,9 +174,18 @@ func fakeAPI(t *testing.T, routes map[string]string) *httptest.Server {
 	return fakeAPIRecording(t, routes, &requestLog{})
 }
 
+// jqlRouter answers a search by its query. Passed in rather than fixed so a
+// test can present a different tracker shape — a team with no sub-tasks, say —
+// without a second fake.
+type jqlRouter func(jql string) (string, bool)
+
 // fakeAPIRecording is fakeAPI with a log of what was asked for, so a test can
 // assert on requests that should not have been made at all.
 func fakeAPIRecording(t *testing.T, routes map[string]string, seen *requestLog) *httptest.Server {
+	return fakeAPIRouting(t, routes, seen, routeJQL)
+}
+
+func fakeAPIRouting(t *testing.T, routes map[string]string, seen *requestLog, router jqlRouter) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seen.record(r.Method + " " + r.URL.Path)
@@ -191,7 +204,7 @@ func fakeAPIRecording(t *testing.T, routes map[string]string, seen *requestLog) 
 			// Record the query itself, not just the path: three different
 			// searches share this endpoint and only one of them is the scan.
 			seen.record("JQL " + jqlOf(raw))
-			body, ok := routeJQL(raw)
+			body, ok := router(jqlOf(raw))
 			if !ok {
 				w.WriteHeader(http.StatusBadRequest)
 				io.WriteString(w, `{"errorMessages":["unrouted jql"]}`)
@@ -236,11 +249,15 @@ func buildStack(t *testing.T) http.Handler {
 }
 
 func buildStackRecording(t *testing.T) (http.Handler, *requestLog) {
+	return buildStackWith(t, jiraRoutes, githubRoutes, routeJQL)
+}
+
+func buildStackWith(t *testing.T, jiraFixtures, githubFixtures map[string]string, router jqlRouter) (http.Handler, *requestLog) {
 	t.Helper()
 
 	jiraCalls := &requestLog{}
-	jiraServer := fakeAPIRecording(t, jiraRoutes, jiraCalls)
-	githubServer := fakeAPI(t, githubRoutes)
+	jiraServer := fakeAPIRouting(t, jiraFixtures, jiraCalls, router)
+	githubServer := fakeAPI(t, githubFixtures)
 
 	path := filepath.Join(t.TempDir(), "projects.yaml")
 	contents := `
@@ -321,19 +338,25 @@ type retrospectiveBody struct {
 		Name string `json:"name"`
 	} `json:"sprint"`
 	Parents []struct {
-		Key      string  `json:"key"`
-		DueDate  *string `json:"dueDate"`
-		InScope  bool    `json:"inScope"`
-		SubTasks []struct {
+		Key     string  `json:"key"`
+		DueDate *string `json:"dueDate"`
+		InScope bool    `json:"inScope"`
+		Rows    []struct {
+			Kind      string `json:"kind"`
 			Key       string `json:"key"`
+			Label     string `json:"label"`
 			Intervals []struct {
 				State string    `json:"state"`
 				From  time.Time `json:"from"`
 				To    time.Time `json:"to"`
 			} `json:"intervals"`
-		} `json:"subtasks"`
+		} `json:"rows"`
 	} `json:"parents"`
 	Warnings []string `json:"warnings"`
+	Burndown struct {
+		Total       float64  `json:"total"`
+		Unestimated []string `json:"unestimated"`
+	} `json:"burndown"`
 }
 
 func fetch(t *testing.T, handler http.Handler, target string) retrospectiveBody {
@@ -357,15 +380,20 @@ func TestRetrospectiveEndToEnd(t *testing.T) {
 	if body.Sprint.Name != "Sprint 26-31" {
 		t.Fatalf("sprint = %+v", body.Sprint)
 	}
-	if len(body.Parents) != 3 {
-		t.Fatalf("got %d parents, want 3 — PROJ-4 has no sub-tasks and is excluded", len(body.Parents))
+	// PROJ-4 has no sub-tasks and is now charted in its own right, for the
+	// teams that never break work down.
+	if len(body.Parents) != 4 {
+		t.Fatalf("got %d parents, want 4", len(body.Parents))
 	}
 	for _, parent := range body.Parents {
-		if parent.Key == "PROJ-4" {
-			t.Error("a parent with no sub-tasks reached the response")
-		}
-		if len(parent.SubTasks) == 0 {
+		if len(parent.Rows) == 0 {
 			t.Errorf("%s was included with no rows to chart", parent.Key)
+		}
+		if parent.Key == "PROJ-4" {
+			if len(parent.Rows) != 1 || parent.Rows[0].Kind != "WORK_ITEM" {
+				t.Errorf("PROJ-4 has %d rows %+v, want one charting the work item itself",
+					len(parent.Rows), parent.Rows)
+			}
 		}
 	}
 
@@ -391,7 +419,7 @@ func TestRetrospectiveDerivesTheFullLifecycleFromBothSources(t *testing.T) {
 	var api []string
 	var boundaries []time.Time
 	for _, parent := range body.Parents {
-		for _, subTask := range parent.SubTasks {
+		for _, subTask := range parent.Rows {
 			if subTask.Key != "PROJ-10" {
 				continue
 			}
@@ -425,7 +453,7 @@ func TestRetrospectiveStallsInReviewWhenNobodyResponds(t *testing.T) {
 	body := fetch(t, handler, "/api/v1/projects/team/sprints/7354/retrospective")
 
 	for _, parent := range body.Parents {
-		for _, subTask := range parent.SubTasks {
+		for _, subTask := range parent.Rows {
 			if subTask.Key != "PROJ-11" {
 				continue
 			}
@@ -444,8 +472,8 @@ func TestRetrospectiveCommittedScopeDropsUncommittedParents(t *testing.T) {
 	handler := buildStack(t)
 	body := fetch(t, handler, "/api/v1/projects/team/sprints/7354/retrospective?scope=committed")
 
-	if len(body.Parents) != 2 {
-		t.Fatalf("got %d parents, want the two committed ones", len(body.Parents))
+	if len(body.Parents) != 3 {
+		t.Fatalf("got %d parents, want the three committed ones", len(body.Parents))
 	}
 	for _, parent := range body.Parents {
 		if parent.Key == "PROJ-2" {
@@ -512,4 +540,45 @@ func (l *requestLog) contains(call string) bool {
 		}
 	}
 	return false
+}
+
+// The other team's shape: no sub-tasks anywhere. Every work item is charted in
+// its own right, which is the case the app used to return an empty chart for.
+func TestRetrospectiveChartsASprintWithNoSubTasks(t *testing.T) {
+	jira := map[string]string{}
+	for path, body := range jiraRoutes {
+		jira[path] = body
+	}
+
+	handler, _ := buildStackWith(t, jira, githubRoutes, func(jql string) (string, bool) {
+		switch {
+		case strings.HasPrefix(jql, "sprint = "):
+			return sprintParentsResponse, true
+		case strings.HasPrefix(jql, "parent IN "):
+			return `{"issues":[]}`, true // this team has none
+		case strings.HasPrefix(jql, "key IN "):
+			return statusHistoryResponse, true
+		}
+		return "", false
+	})
+
+	body := fetch(t, handler, "/api/v1/projects/team/sprints/7354/retrospective")
+
+	if len(body.Parents) == 0 {
+		t.Fatal("no work items charted for a sprint with no sub-tasks")
+	}
+	for _, parent := range body.Parents {
+		if len(parent.Rows) != 1 {
+			t.Fatalf("%s has %d rows, want one charting the work item itself", parent.Key, len(parent.Rows))
+		}
+		if parent.Rows[0].Kind != "WORK_ITEM" {
+			t.Errorf("%s row kind is %q, want WORK_ITEM", parent.Key, parent.Rows[0].Kind)
+		}
+		if parent.Rows[0].Key != parent.Key {
+			t.Errorf("%s row is keyed %q, want the work item's own key", parent.Key, parent.Rows[0].Key)
+		}
+	}
+	if body.Burndown.Total <= 0 {
+		t.Error("the burndown lost its points along with the sub-tasks")
+	}
 }

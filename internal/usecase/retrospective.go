@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -92,9 +93,9 @@ func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (do
 	if err != nil {
 		return domain.Retrospective{}, err
 	}
-	if len(subTasks) == 0 {
-		return domain.Retrospective{Sprint: sprint, Groups: nil, Axis: axis}, nil
-	}
+	// No early return on an empty sub-task list. A sprint with no sub-tasks at
+	// all is not an empty sprint — it is the whole shape of a team that does
+	// not break work down, and every one of its work items is charted directly.
 
 	// The parents' own history is asked for alongside the sub-tasks'. The
 	// burndown needs to know when each work item was finished, and the tracker
@@ -108,7 +109,7 @@ func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (do
 
 	inScope := selectScope(parents, sprint, location, req.Scope)
 
-	retrospective := r.assemble(sprint, location, project.Settings.Schedule(), inScope, subTasks, history, codeEvents)
+	retrospective := r.assemble(sprint, location, project.Settings, inScope, subTasks, history, codeEvents)
 	retrospective.Burndown = domain.BuildBurndown(
 		burndownItems(inScope, history), sprint, project.Settings.Schedule(), location)
 	return retrospective, nil
@@ -118,9 +119,8 @@ func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (do
 //
 // It runs on the scope selection rather than on the assembled groups, so the
 // two views answer the same question about scope while disagreeing about rows:
-// the timeline drops a work item with nothing to chart, and the burndown must
-// not — a story with no sub-tasks still carries points and still has to be
-// finished.
+// the timeline drops a work item whose rows all fell outside the window, and
+// the burndown must not — its points were still committed.
 func burndownItems(parents []domain.WorkItem, history map[domain.IssueKey][]domain.StatusChange) []domain.BurndownItem {
 	items := make([]domain.BurndownItem, 0, len(parents))
 	for _, parent := range parents {
@@ -260,14 +260,14 @@ func (r *Retrospective) findSprint(ctx context.Context, trace Trace, tracker dom
 func (r *Retrospective) assemble(
 	sprint domain.Sprint,
 	location *time.Location,
-	schedule domain.WorkingHours,
+	settings domain.ProjectSettings,
 	parents []domain.WorkItem,
 	subTasks []domain.SubTask,
 	history map[domain.IssueKey][]domain.StatusChange,
 	codeEvents map[domain.IssueKey][]domain.Event,
 ) domain.Retrospective {
 	window := sprint.Window()
-	byParent := map[domain.IssueKey][]domain.SubTaskTimeline{}
+	byParent := map[domain.IssueKey][]domain.Row{}
 	var warnings []string
 
 	// A sub-task whose parent is not in the selected set has nowhere to be
@@ -275,6 +275,7 @@ func (r *Retrospective) assemble(
 	// warnings describing only what the reader can actually see, and makes the
 	// result independent of a tracker returning more than it was asked for.
 	selected := make(map[domain.IssueKey]struct{}, len(parents))
+	hasSubTasks := map[domain.IssueKey]bool{}
 	for _, parent := range parents {
 		selected[parent.Key] = struct{}{}
 	}
@@ -283,63 +284,165 @@ func (r *Retrospective) assemble(
 		if _, ok := selected[subTask.ParentKey]; !ok {
 			continue
 		}
-		changes := history[subTask.Key]
-		events := append(statusEvents(changes), codeEvents[subTask.Key]...)
+		hasSubTasks[subTask.ParentKey] = true
 
-		intervals := domain.BuildTimeline(events, initialStatus(subTask, changes), subTask.Created, window)
-		if len(intervals) == 0 {
-			// Created after the sprint closed: charting nothing is correct, but
-			// say so rather than leaving a gap the reader must explain.
-			warnings = append(warnings, fmt.Sprintf("%s: created after the sprint ended, so it has no timeline", subTask.Key))
+		rows, rowWarnings := rowsFor(
+			subTask.Key, subTask.Summary, domain.RowSubTask,
+			history[subTask.Key], codeEvents[subTask.Key],
+			initialStatus(subTask.Status, history[subTask.Key]), subTask.Created, window)
+
+		warnings = append(warnings, rowWarnings...)
+		byParent[subTask.ParentKey] = append(byParent[subTask.ParentKey], rows...)
+	}
+
+	// A work item nobody broke down is charted directly. Teams that do not use
+	// sub-tasks are otherwise looking at a page of headers over empty space.
+	for _, parent := range parents {
+		if hasSubTasks[parent.Key] {
 			continue
 		}
-		if _, linked := codeEvents[subTask.Key]; !linked {
-			// Linkage is a heuristic on branch names. A sub-task with no branch
-			// may genuinely have none, or may have one the matcher missed;
-			// silently charting it as never-started would hide the difference.
-			warnings = append(warnings, fmt.Sprintf("%s: no linked branch or pull request found", subTask.Key))
-		}
+		rows, rowWarnings := rowsFor(
+			parent.Key, parent.Summary, domain.RowWorkItem,
+			history[parent.Key], codeEvents[parent.Key],
+			initialStatus(parent.Status, history[parent.Key]), parent.Created, window)
 
-		byParent[subTask.ParentKey] = append(byParent[subTask.ParentKey], domain.SubTaskTimeline{
-			SubTask:   subTask,
-			Intervals: intervals,
-		})
+		warnings = append(warnings, rowWarnings...)
+		byParent[parent.Key] = append(byParent[parent.Key], rows...)
 	}
 
 	groups := make([]domain.ParentGroup, 0, len(parents))
 	for _, parent := range parents {
-		timelines := byParent[parent.Key]
-		// A parent with nothing to chart is a header over empty space. That
-		// includes parents whose only sub-tasks were skipped — created after
-		// the sprint closed, say — which is why this filters on the rows that
-		// survived rather than on whether the tracker reported any sub-tasks.
-		if len(timelines) == 0 {
+		rows := byParent[parent.Key]
+		// A work item with nothing to chart is a header over empty space. Now
+		// that every item yields at least one row, this fires only for one
+		// whose rows were all skipped for falling outside the window — which is
+		// what it was always really for.
+		if len(rows) == 0 {
 			continue
 		}
-		sort.SliceStable(timelines, func(i, j int) bool {
-			return timelines[i].SubTask.Key < timelines[j].SubTask.Key
+		sort.SliceStable(rows, func(i, j int) bool {
+			if rows[i].Key != rows[j].Key {
+				return rows[i].Key < rows[j].Key
+			}
+			return rows[i].Label < rows[j].Label
 		})
 		groups = append(groups, domain.ParentGroup{
-			Parent:   parent,
-			InScope:  domain.InScope(parent.DueDate, sprint, location),
-			SubTasks: timelines,
+			Parent:  parent,
+			InScope: domain.InScope(parent.DueDate, sprint, location),
+			Rows:    rows,
 		})
 	}
+	sortGroups(groups, settings.TypesLast)
 
 	return domain.Retrospective{
 		Sprint:   sprint,
 		Groups:   groups,
 		Warnings: warnings,
-		Axis:     domain.AxisSegments(window, schedule, location),
+		Axis:     domain.AxisSegments(window, settings.Schedule(), location),
 	}
 }
 
-// initialStatus recovers the status a sub-task held before its first recorded
+// rowsFor turns one issue's facts into the rows that chart it — usually one,
+// and one per branch when the issue was worked on across several.
+func rowsFor(
+	key domain.IssueKey,
+	summary string,
+	kind domain.RowKind,
+	changes []domain.StatusChange,
+	code []domain.Event,
+	initial domain.IssueStatus,
+	created time.Time,
+	window domain.Window,
+) ([]domain.Row, []string) {
+	var warnings []string
+
+	status := statusEvents(changes)
+	strands := domain.SplitByBranch(code)
+
+	// Strands are per branch, and an issue with no code at all has none. The
+	// unnamed strand — activity that named no branch — is not a branch of its
+	// own, so it does not on its own make an issue multi-branch.
+	named := 0
+	for _, strand := range strands {
+		if strand.Branch != "" {
+			named++
+		}
+	}
+
+	if len(code) == 0 {
+		warnings = append(warnings, fmt.Sprintf("%s: no linked branch or pull request found", key))
+	}
+
+	if named <= 1 {
+		intervals := domain.BuildTimeline(append(status, code...), initial, created, window)
+		if len(intervals) == 0 {
+			// Created after the sprint closed: charting nothing is correct, but
+			// say so rather than leaving a gap the reader must explain.
+			return nil, append(warnings,
+				fmt.Sprintf("%s: created after the sprint ended, so it has no timeline", key))
+		}
+		return []domain.Row{{Kind: kind, Key: key, Label: summary, Intervals: intervals}}, warnings
+	}
+
+	// Several branches for one issue. Charting them as one bar would mean a bar
+	// holding two review states at once, so each gets a row — and the team gets
+	// told, because the split makes the chart honest but the branches are still
+	// a discipline problem.
+	branches := make([]string, 0, named)
+	rows := make([]domain.Row, 0, named)
+	for _, strand := range strands {
+		if strand.Branch == "" {
+			continue
+		}
+		branches = append(branches, strand.Branch)
+
+		// Status changes belong to the issue rather than to any branch, so they
+		// are replayed into every strand: a Blocked or Done set on the tracker
+		// applies to all of the item's rows.
+		intervals := domain.BuildTimeline(append(status, strand.Events...), initial, created, window)
+		if len(intervals) == 0 {
+			continue
+		}
+		rows = append(rows, domain.Row{
+			Kind: domain.RowBranch, Key: key, Label: strand.Branch, Intervals: intervals,
+		})
+	}
+
+	if len(rows) == 0 {
+		return nil, append(warnings,
+			fmt.Sprintf("%s: created after the sprint ended, so it has no timeline", key))
+	}
+	return rows, append(warnings, fmt.Sprintf(
+		"%s: %d branches for one work item, charted one row each (%s)",
+		key, len(branches), strings.Join(branches, ", ")))
+}
+
+// sortGroups moves the configured issue types to the bottom, keeping everything
+// else in the tracker's own order.
+//
+// Which types belong at the bottom is a fact about a team's process — support
+// queues, spikes, chores — and not something this code could know, so it comes
+// from the project's settings and the comparison is by name.
+func sortGroups(groups []domain.ParentGroup, typesLast []string) {
+	if len(typesLast) == 0 {
+		return
+	}
+	sink := make(map[string]int, len(typesLast))
+	for i, name := range typesLast {
+		sink[strings.ToLower(strings.TrimSpace(name))] = i + 1
+	}
+	rank := func(group domain.ParentGroup) int {
+		return sink[strings.ToLower(strings.TrimSpace(group.Parent.Type))]
+	}
+	sort.SliceStable(groups, func(i, j int) bool { return rank(groups[i]) < rank(groups[j]) })
+}
+
+// initialStatus recovers the status an issue held before its first recorded
 // change. With no history at all, the current status is the only evidence
 // available and has to stand for the whole window.
-func initialStatus(subTask domain.SubTask, changes []domain.StatusChange) domain.IssueStatus {
+func initialStatus(current domain.IssueStatus, changes []domain.StatusChange) domain.IssueStatus {
 	if len(changes) == 0 {
-		return subTask.Status
+		return current
 	}
 	earliest := changes[0]
 	for _, change := range changes[1:] {

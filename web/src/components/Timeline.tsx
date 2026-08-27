@@ -26,8 +26,13 @@ const SEGMENT_GAP = 2;
  */
 const MIN_SEGMENT_WIDTH = 3;
 
-interface Row {
-  kind: "group" | "subtask";
+/**
+ * One line of the laid-out chart. Distinct from the Row the API sends: a
+ * "group" here is the work item's heading, which may itself carry the bar when
+ * the item was never broken down and there is nothing to nest under it.
+ */
+interface LayoutRow {
+  kind: "group" | "row";
   key: string;
   label: string;
   sublabel?: string;
@@ -61,27 +66,40 @@ function useContainerWidth() {
   return { ref, width };
 }
 
-function layout(parents: Parent[]): { rows: Row[]; height: number } {
-  const rows: Row[] = [];
+/** A branch row is labelled by its branch, without the repository prefix. */
+function branchLabel(name: string): string {
+  const separator = name.indexOf(":");
+  return separator === -1 ? name : name.slice(separator + 1);
+}
+
+function layout(parents: Parent[]): { rows: LayoutRow[]; height: number } {
+  const rows: LayoutRow[] = [];
   let y = 0;
 
   for (const parent of parents) {
+    // A work item nobody broke down has exactly one row, and it is the item
+    // itself. Drawing a heading and then an identical row beneath it would say
+    // the same thing twice, so the heading carries the bar.
+    const solo = parent.rows.length === 1 && parent.rows[0].kind === "WORK_ITEM";
+
     rows.push({
       kind: "group",
       key: parent.key,
       label: `${parent.key} — ${parent.summary}`,
       inScope: parent.inScope,
+      intervals: solo ? parent.rows[0].intervals : undefined,
       y,
     });
     y += GROUP_HEADER_HEIGHT;
+    if (solo) continue;
 
-    for (const subTask of parent.subtasks) {
+    for (const row of parent.rows) {
       rows.push({
-        kind: "subtask",
-        key: subTask.key,
-        label: subTask.key,
-        sublabel: subTask.summary,
-        intervals: subTask.intervals,
+        kind: "row",
+        key: `${parent.key}/${row.kind === "BRANCH" ? row.label : row.key}`,
+        label: row.kind === "BRANCH" ? branchLabel(row.label) : row.key,
+        sublabel: row.kind === "BRANCH" ? "" : row.label,
+        intervals: row.intervals,
         y,
       });
       y += ROW_HEIGHT;
@@ -273,8 +291,31 @@ export function Timeline({
           const y = AXIS_HEIGHT + row.y;
 
           if (row.kind === "group") {
+            const headingBar = row.intervals ?? [];
+            // A heading with a bar has only the gutter to write in; one without
+            // may run the full width, since nothing is drawn beside it.
+            const titleLimit = headingBar.length === 0 ? 40 : row.inScope === false ? 16 : 34;
             return (
               <g key={`group-${row.key}`}>
+                {headingBar.map((interval, index) => {
+                  const x1 = scale(interval.from);
+                  const width = Math.max(MIN_SEGMENT_WIDTH, scale(interval.to) - x1 - SEGMENT_GAP);
+                  return (
+                    <rect
+                      key={`${row.key}-${index}`}
+                      x={x1}
+                      y={y + (GROUP_HEADER_HEIGHT - BAR_HEIGHT) / 2}
+                      width={width}
+                      height={BAR_HEIGHT}
+                      rx={3}
+                      fill={stateColor(interval.state)}
+                      onMouseMove={(event) =>
+                        setHover({ x: event.clientX, y: event.clientY, subTask: row.key, interval })
+                      }
+                      onMouseLeave={() => setHover(null)}
+                    />
+                  );
+                })}
                 <text
                   x={0}
                   y={y + GROUP_HEADER_HEIGHT - 10}
@@ -282,17 +323,21 @@ export function Timeline({
                   fontWeight={600}
                   fill="var(--text-primary)"
                 >
-                  {truncate(row.label, 40)}
+                  <title>{row.label}</title>
+                  {truncate(row.label, titleLimit)}
                 </text>
                 {row.inScope === false && (
+                  // Right-aligned inside the gutter when the heading carries a
+                  // bar, since the plot edge is occupied; at the plot edge
+                  // otherwise, where there is nothing to collide with.
                   <text
-                    x={LABEL_WIDTH + plotWidth}
+                    x={headingBar.length === 0 ? LABEL_WIDTH + plotWidth : LABEL_WIDTH - 10}
                     y={y + GROUP_HEADER_HEIGHT - 10}
                     fontSize={11}
                     textAnchor="end"
                     fill="var(--text-muted)"
                   >
-                    not in committed scope
+                    {headingBar.length === 0 ? "not in committed scope" : "not committed"}
                   </text>
                 )}
               </g>

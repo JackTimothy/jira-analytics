@@ -234,8 +234,8 @@ func TestRetrospectivePresentsIntervalsAndWarnings(t *testing.T) {
 		Groups: []domain.ParentGroup{{
 			Parent:  domain.WorkItem{Key: "PROJ-1", Summary: "Story", DueDate: &due},
 			InScope: true,
-			SubTasks: []domain.SubTaskTimeline{{
-				SubTask: domain.SubTask{Key: "PROJ-11", Summary: "API"},
+			Rows: []domain.Row{{
+				Kind: domain.RowSubTask, Key: "PROJ-11", Label: "API",
 				Intervals: []domain.Interval{{
 					State: domain.StateApproved,
 					From:  time.Date(2026, 8, 5, 9, 0, 0, 0, time.UTC),
@@ -258,7 +258,7 @@ func TestRetrospectivePresentsIntervalsAndWarnings(t *testing.T) {
 	if got.Parents[0].DueDate == nil || *got.Parents[0].DueDate != "2026-08-17" {
 		t.Errorf("due date rendered as %v, want 2026-08-17", got.Parents[0].DueDate)
 	}
-	interval := got.Parents[0].SubTasks[0].Intervals[0]
+	interval := got.Parents[0].Rows[0].Intervals[0]
 	if interval.State != "APPROVED" {
 		t.Errorf("state = %q, want APPROVED", interval.State)
 	}

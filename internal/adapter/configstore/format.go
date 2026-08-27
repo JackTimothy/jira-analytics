@@ -29,6 +29,11 @@ type projectFormat struct {
 type settingsFormat struct {
 	Timezone     string              `yaml:"timezone"`
 	WorkingHours *workingHoursFormat `yaml:"workingHours,omitempty"`
+
+	// TypesLast names the issue types that belong at the bottom of the chart —
+	// a support queue, chores. Which types those are is a fact about one team's
+	// process, so it lives in the file rather than in the code.
+	TypesLast []string `yaml:"typesLast,omitempty"`
 }
 
 // workingHoursFormat uses day names and HH:MM clock times because the file is
@@ -172,7 +177,11 @@ func (p projectFormat) toDomain() (domain.Project, error) {
 	if err != nil {
 		return domain.Project{}, err
 	}
-	settings := domain.ProjectSettings{Timezone: p.Settings.Timezone, WorkingHours: workingHours}
+	settings := domain.ProjectSettings{
+		Timezone:     p.Settings.Timezone,
+		WorkingHours: workingHours,
+		TypesLast:    p.Settings.TypesLast,
+	}
 	if err := settings.Validate(); err != nil {
 		return domain.Project{}, err
 	}
@@ -217,6 +226,7 @@ func fromDomain(projects []domain.Project) fileFormat {
 			Settings: settingsFormat{
 				Timezone:     project.Settings.Timezone,
 				WorkingHours: fromDomainHours(project.Settings.WorkingHours),
+				TypesLast:    project.Settings.TypesLast,
 			},
 			Tracker: trackerFormat{
 				Type:       SupportedTrackerType,

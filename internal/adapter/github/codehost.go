@@ -157,7 +157,7 @@ func (c *CodeHost) LinkedEvents(
 	// comparison of two runs — a parity test between transports, most of all —
 	// fail for a reason that is not a difference.
 	for key := range results {
-		domain.SortEvents(results[key])
+		sortEventsDeterministically(results[key])
 	}
 	return results, nil
 }
@@ -675,9 +675,10 @@ func eventsFromDetail(repo domain.RepoRef, pull pullJSON, detail pullDetail, pol
 		})
 	}
 	events = append(events, domain.PROpened{
-		At:    pull.CreatedAt,
-		PR:    key,
-		Draft: draftAtCreation(pull, detail.Timeline),
+		At:     pull.CreatedAt,
+		PR:     key,
+		Draft:  draftAtCreation(pull, detail.Timeline),
+		Branch: repo.String() + ":" + pull.Head.Ref,
 	})
 	events = append(events, timelineEvents(key, detail.Timeline, policy)...)
 	events = append(events, reviewEvents(key, detail.Reviews, policy)...)
@@ -727,9 +728,10 @@ func (c *CodeHost) eventsForPullRequest(
 	}
 
 	events = append(events, domain.PROpened{
-		At:    pull.CreatedAt,
-		PR:    key,
-		Draft: draftAtCreation(pull, timeline),
+		At:     pull.CreatedAt,
+		PR:     key,
+		Draft:  draftAtCreation(pull, timeline),
+		Branch: repo.String() + ":" + pull.Head.Ref,
 	})
 	events = append(events, timelineEvents(key, timeline, policy)...)
 	events = append(events, reviewEvents(key, reviews, policy)...)
@@ -790,4 +792,21 @@ func (c *CodeHost) reviewsFor(ctx context.Context, repo domain.RepoRef, number i
 		}
 	}
 	return all, nil
+}
+
+// sortEventsDeterministically orders events by time, breaking ties by their own
+// content.
+//
+// Time alone is not enough. Two branches first seen at the same instant — one
+// found through its pull request, one still standing — are equal under a
+// time-only sort, so a stable sort keeps whatever order the network happened to
+// produce. That is invisible in the chart, which sorts again before replaying,
+// and glaring in any comparison of two runs.
+func sortEventsDeterministically(events []domain.Event) {
+	sort.SliceStable(events, func(i, j int) bool {
+		if !events[i].When().Equal(events[j].When()) {
+			return events[i].When().Before(events[j].When())
+		}
+		return fmt.Sprintf("%T%+v", events[i], events[i]) < fmt.Sprintf("%T%+v", events[j], events[j])
+	})
 }

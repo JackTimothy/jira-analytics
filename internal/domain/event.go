@@ -48,6 +48,13 @@ type PROpened struct {
 	At    time.Time
 	PR    PRKey
 	Draft bool
+
+	// Branch is the head the pull request was opened from, in the same
+	// "repo:branch" form BranchFirstSeen uses. It is carried so that an issue
+	// worked on across several branches can be split into one row per branch:
+	// every other pull-request event names only a PRKey, and this is what ties
+	// that key to a branch.
+	Branch string
 }
 
 func (e PROpened) When() time.Time { return e.At }
