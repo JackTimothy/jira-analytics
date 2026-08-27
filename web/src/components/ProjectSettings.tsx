@@ -60,12 +60,13 @@ export function ProjectSettings({
 
   return (
     <div className="stack">
-      <div className="row" style={{ alignItems: "flex-end", gap: 24 }}>
+      {/* Each field is label, control, then a caption. The captions used to sit
+          inline with their labels, where they competed with the control for the
+          same width and the longer of the two wrapped. Below the control they
+          can say what they need to at any width. */}
+      <div className="row" style={{ alignItems: "flex-start", gap: 32 }}>
         <div className="field">
-          <label htmlFor="timezone">
-            Project timezone
-            <span className="muted small"> — decides which day a sprint ends on</span>
-          </label>
+          <label htmlFor="timezone">Project timezone</label>
           <select
             id="timezone"
             value={timezone}
@@ -78,14 +79,12 @@ export function ProjectSettings({
               </option>
             ))}
           </select>
+          <span className="muted small">Decides which day a sprint ends on</span>
         </div>
 
         <div className="field" style={{ maxWidth: "none" }}>
-          <span className="small">
-            Working hours
-            <span className="muted small"> — the part of the timeline shown to scale</span>
-          </span>
-          <div className="row" style={{ gap: 8 }}>
+          <span id="working-hours-label">Working hours</span>
+          <div className="row" style={{ gap: 8 }} role="group" aria-labelledby="working-hours-label">
             <input
               type="time"
               aria-label="Working hours start"
@@ -116,6 +115,7 @@ export function ProjectSettings({
               ))}
             </span>
           </div>
+          <span className="muted small">The part of the timeline shown to scale</span>
         </div>
       </div>
 
