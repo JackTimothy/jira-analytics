@@ -80,8 +80,30 @@ function useAsync<T>(load: () => Promise<T>, deps: unknown[]) {
   return { data, error, loading };
 }
 
-function Status({ loading, error }: { loading: boolean; error: string | null }) {
-  if (loading) return <p className="muted">Loading…</p>;
+/**
+ * Loading is deliberately large. A retrospective takes several seconds to
+ * assemble — the tracker and the code host are both read live — and a line of
+ * small grey text is easy to miss while the previous answer is still on screen.
+ */
+function Status({
+  loading,
+  error,
+  label = "Loading…",
+  detail,
+}: {
+  loading: boolean;
+  error: string | null;
+  label?: string;
+  detail?: string;
+}) {
+  if (loading)
+    return (
+      <div className="loading card" role="status" aria-live="polite">
+        <span className="spinner" aria-hidden="true" />
+        <strong>{label}</strong>
+        {detail && <span className="muted small">{detail}</span>}
+      </div>
+    );
   if (error)
     return (
       <p className="notice error" role="alert">
@@ -94,7 +116,7 @@ function Status({ loading, error }: { loading: boolean; error: string | null }) 
 function ProjectsView({ onOpen }: { onOpen: (project: Project) => void }) {
   const { data, error, loading } = useAsync(() => api.listProjects(), []);
 
-  if (loading || error) return <Status loading={loading} error={error} />;
+  if (loading || error) return <Status loading={loading} error={error} label="Loading projects…" />;
 
   return (
     <section className="card">
@@ -148,9 +170,15 @@ function SprintsView({
       </section>
 
       <h2 style={{ fontSize: 16, marginBottom: 10 }}>Sprints</h2>
-      <Status loading={loading} error={error} />
-
-      {data && (
+      {loading || error ? (
+        <Status
+          loading={loading}
+          error={error}
+          label="Loading sprints…"
+          detail="Reading the sprints this project's own work belongs to."
+        />
+      ) : (
+        data && (
         <section className="card">
           <ul className="list">
             {data.map((sprint) => (
@@ -172,6 +200,7 @@ function SprintsView({
             ))}
           </ul>
         </section>
+        )
       )}
     </>
   );
@@ -247,9 +276,18 @@ function RetrospectiveView({
         </div>
       </div>
 
-      <Status loading={loading} error={error} />
-
-      {data && (
+      {/* The previous sprint's charts are cleared while the next answer is on
+          its way. Leaving them up made a scope switch look instantaneous, and
+          the reader would act on the wrong chart without ever knowing they had. */}
+      {loading || error ? (
+        <Status
+          loading={loading}
+          error={error}
+          label="Loading data and building charts…"
+          detail="Reading the issue tracker and the code host. This usually takes a few seconds."
+        />
+      ) : (
+        data && (
         <div className="stack">
           <Legend />
           <section className="card" style={{ padding: 16 }}>
@@ -320,6 +358,7 @@ function RetrospectiveView({
             </section>
           )}
         </div>
+        )
       )}
     </>
   );
