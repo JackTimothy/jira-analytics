@@ -179,7 +179,7 @@ export function Timeline({
   const isCompressed = scale.segments.length > 1;
 
   if (rows.length === 0) {
-    return <p className="muted">No sub-tasks to chart for this sprint.</p>;
+    return <p className="muted">No work to chart for this sprint.</p>;
   }
 
   return (

@@ -248,7 +248,7 @@ function RetrospectiveView({
         <div className="row">
           <div className="segmented" role="group" aria-label="Sprint scope">
             <button aria-pressed={scope === "all"} onClick={() => setScope("all")}>
-              All sub-tasks
+              All work
             </button>
             <button aria-pressed={scope === "committed"} onClick={() => setScope("committed")}>
               Committed scope
@@ -257,7 +257,7 @@ function RetrospectiveView({
           <span className="muted small">
             {scope === "committed"
               ? "Parents due on or before the sprint end, including carryover."
-              : "Every sub-task whose parent was in the sprint."}
+              : "Every work item in the sprint, whatever its due date."}
           </span>
         </div>
 
