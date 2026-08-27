@@ -1,16 +1,15 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
+import { MIN_PLOT_WIDTH, PADDING_RIGHT, clampGutter, defaultGutter } from "../chartlayout";
 import { buildCompressedScale, buildLinearScale } from "../timescale";
 import type { AxisSegment, Burndown as BurndownData, BurndownPoint, Sprint } from "../types";
 
 /**
  * The burndown shares the timeline's left gutter and x-scale, so the two charts
  * stack into one reading: a drop in the points line sits directly under the
- * sub-task row whose merge caused it.
+ * sub-task row whose merge caused it. The gutter is therefore not this chart's
+ * to choose — it takes the same value the timeline was given.
  */
-const LABEL_WIDTH = 268;
-const PADDING_RIGHT = 16;
-const MIN_PLOT_WIDTH = 520;
 const PLOT_HEIGHT = 168;
 const AXIS_HEIGHT = 26;
 const TOP_PADDING = 12;
@@ -78,11 +77,14 @@ export function Burndown({
   sprint,
   axis,
   compressed,
+  labelWidth: requested,
 }: {
   burndown: BurndownData;
   sprint: Sprint;
   axis: AxisSegment[];
   compressed: boolean;
+  /** The gutter the timeline is using, or null for the responsive default. */
+  labelWidth: number | null;
 }) {
   const { ref, width } = useContainerWidth();
   const [hover, setHover] = useState<HoverState | null>(null);
@@ -90,14 +92,20 @@ export function Burndown({
   const start = useMemo(() => new Date(sprint.start), [sprint.start]);
   const end = useMemo(() => new Date(sprint.end), [sprint.end]);
 
-  const plotWidth = Math.max(MIN_PLOT_WIDTH, width - LABEL_WIDTH - PADDING_RIGHT);
-  const totalWidth = LABEL_WIDTH + plotWidth + PADDING_RIGHT;
+  const labelWidth =
+    width === 0
+      ? (requested ?? 0)
+      : requested === null
+        ? defaultGutter(width)
+        : clampGutter(requested, width);
+  const plotWidth = Math.max(MIN_PLOT_WIDTH, width - labelWidth - PADDING_RIGHT);
+  const totalWidth = labelWidth + plotWidth + PADDING_RIGHT;
   const height = TOP_PADDING + PLOT_HEIGHT + AXIS_HEIGHT;
 
   const scale = useMemo(() => {
-    const linear = buildLinearScale(start.getTime(), end.getTime(), LABEL_WIDTH, plotWidth);
+    const linear = buildLinearScale(start.getTime(), end.getTime(), labelWidth, plotWidth);
     if (!compressed) return linear;
-    return buildCompressedScale(axis, LABEL_WIDTH, plotWidth) ?? linear;
+    return buildCompressedScale(axis, labelWidth, plotWidth) ?? linear;
   }, [axis, compressed, start, end, plotWidth]);
 
   const ticks = useMemo(() => pointTicks(burndown.total), [burndown.total]);
@@ -123,7 +131,7 @@ export function Burndown({
   const onMove = (event: React.MouseEvent<SVGSVGElement>) => {
     const box = event.currentTarget.getBoundingClientRect();
     const x = ((event.clientX - box.left) / box.width) * totalWidth;
-    if (x < LABEL_WIDTH || x > LABEL_WIDTH + plotWidth) {
+    if (x < labelWidth || x > labelWidth + plotWidth) {
       setHover(null);
       return;
     }
@@ -188,15 +196,15 @@ export function Burndown({
         {ticks.map((value) => (
           <g key={value}>
             <line
-              x1={LABEL_WIDTH}
-              x2={LABEL_WIDTH + plotWidth}
+              x1={labelWidth}
+              x2={labelWidth + plotWidth}
               y1={y(value)}
               y2={y(value)}
               stroke="var(--gridline)"
               strokeWidth={1}
             />
             <text
-              x={LABEL_WIDTH - 8}
+              x={labelWidth - 8}
               y={y(value) + 4}
               textAnchor="end"
               fontSize={11}
@@ -238,8 +246,8 @@ export function Burndown({
         )}
 
         <line
-          x1={LABEL_WIDTH}
-          x2={LABEL_WIDTH + plotWidth}
+          x1={labelWidth}
+          x2={labelWidth + plotWidth}
           y1={TOP_PADDING + PLOT_HEIGHT}
           y2={TOP_PADDING + PLOT_HEIGHT}
           stroke="var(--border)"
@@ -254,7 +262,7 @@ export function Burndown({
             position: "absolute",
             left: `${(hover.x / totalWidth) * 100}%`,
             top: TOP_PADDING,
-            transform: hover.x > LABEL_WIDTH + plotWidth * 0.7 ? "translateX(-104%)" : "translateX(12px)",
+            transform: hover.x > labelWidth + plotWidth * 0.7 ? "translateX(-104%)" : "translateX(12px)",
             pointerEvents: "none",
             background: "var(--surface)",
             border: "1px solid var(--border)",

@@ -136,6 +136,26 @@ It cannot: the API sends sprint-level series with no per-item points to rebuild
 a narrowed curve from, and moving that arithmetic into the client would take
 the burndown out of the domain layer where it is tested.
 
+### The label gutter
+
+The column holding the work item titles takes about **30% of the chart** by
+default, so a wider window means longer titles with nothing to set. **Drag the
+line between the labels and the plot** to change it — the timeline and the
+burndown move together, because the burndown's gutter exists so its x-axis
+lines up with the timeline's. It is a real control: Tab reaches it, the arrow
+keys nudge it, Home and End go to the extremes, and double-click gives back the
+automatic width. Your choice is remembered per browser.
+
+Labels are cut to the pixels available rather than to a character count. The
+count was a guess calibrated to one gutter width, and with the width adjustable
+a guess that overflows or leaves a gap reads as a rendering fault. Headings stay
+inside the gutter for the same reason: they were once allowed the full width
+when no bar sat beside them, which was harmless while the character limit kept
+them short, and crosses the axis once they are measured.
+
+The gutter cannot squeeze the plot below `MIN_PLOT_WIDTH`, and on a window too
+narrow to satisfy both it keeps a readable gutter and lets the chart scroll.
+
 ## Running it
 
 ### Prerequisites

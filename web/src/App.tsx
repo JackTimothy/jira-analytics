@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { api } from "./api";
+import { clampGutter, readStoredGutter, storeGutter } from "./chartlayout";
 import { filterParents } from "./filter";
 import { Legend } from "./components/Legend";
 import { ProjectSettings } from "./components/ProjectSettings";
@@ -127,7 +128,7 @@ function ProjectsView({ onOpen }: { onOpen: (project: Project) => void }) {
   if (loading || error) return <Status loading={loading} error={error} label="Loading projects…" />;
 
   return (
-    <section className="card">
+    <section className="card list-card">
       <ul className="list">
         {(data ?? []).map((project) => (
           <li key={project.id}>
@@ -187,7 +188,7 @@ function SprintsView({
         />
       ) : (
         data && (
-        <section className="card">
+        <section className="card list-card">
           <ul className="list">
             {data.map((sprint) => (
               <li key={sprint.id}>
@@ -233,6 +234,11 @@ function RetrospectiveView({
   // working hours get the space. Linear is one click away for judging real
   // elapsed time.
   const [compressed, setCompressed] = useState(true);
+  // The label gutter, owned here because both charts must use the same one:
+  // the burndown's gutter exists so its x-axis lines up with the timeline's.
+  // null means the reader has not chosen, and each chart takes the responsive
+  // default for the width it actually has.
+  const [labelWidth, setLabelWidth] = useState<number | null>(readStoredGutter);
 
   const { data, error, loading } = useAsync<Retrospective>(
     () => api.retrospective(project.id, sprint.id, scope),
@@ -344,6 +350,15 @@ function RetrospectiveView({
                 sprint={data.sprint}
                 axis={data.axis ?? []}
                 compressed={compressed}
+                labelWidth={labelWidth}
+                // Clamped against the window rather than the chart, which is a
+                // few pixels wider; the chart clamps again for the exact fit.
+                onLabelWidthChange={(next) => setLabelWidth(clampGutter(next, window.innerWidth))}
+                onLabelWidthCommit={() => storeGutter(labelWidth)}
+                onLabelWidthReset={() => {
+                  setLabelWidth(null);
+                  storeGutter(null);
+                }}
               />
             )}
           </section>
@@ -383,6 +398,7 @@ function RetrospectiveView({
                 sprint={data.sprint}
                 axis={data.axis ?? []}
                 compressed={compressed}
+                labelWidth={labelWidth}
               />
             )}
             {filtering && (

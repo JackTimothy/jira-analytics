@@ -1,16 +1,23 @@
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 
+import { MIN_PLOT_WIDTH, PADDING_RIGHT, clampGutter, defaultGutter } from "../chartlayout";
 import { buildCompressedScale, buildLinearScale } from "../timescale";
+import { chartFont, fit, measure } from "../textwidth";
 import type { AxisSegment, Interval, Parent, Sprint } from "../types";
 import { stateColor, stateLabel } from "../types";
+import { GutterDivider } from "./GutterDivider";
 
-const LABEL_WIDTH = 268;
 const ROW_HEIGHT = 26;
 const BAR_HEIGHT = 14;
 const GROUP_HEADER_HEIGHT = 30;
 const AXIS_HEIGHT = 28;
-const PADDING_RIGHT = 16;
-const MIN_PLOT_WIDTH = 520;
+
+/** Breathing room between a label and the plot edge it stops short of. */
+const LABEL_GAP = 10;
+
+const HEADING_FONT = chartFont(12, 600);
+const ROW_FONT = chartFont(12);
+const NOTE_FONT = chartFont(11);
 
 /**
  * A 2px gap between adjacent segments, so a state change reads as a change
@@ -121,10 +128,6 @@ function dayTicks(start: Date, end: Date): Date[] {
   return ticks;
 }
 
-function truncate(text: string, limit: number): string {
-  return text.length > limit ? `${text.slice(0, limit - 1)}\u2026` : text;
-}
-
 /**
  * A band longer than 20 hours contains at least a full day off — a weekend or
  * holiday — and earns a label; ordinary nights stay quiet.
@@ -149,11 +152,20 @@ export function Timeline({
   sprint,
   axis,
   compressed,
+  labelWidth: requested,
+  onLabelWidthChange,
+  onLabelWidthCommit,
+  onLabelWidthReset,
 }: {
   parents: Parent[];
   sprint: Sprint;
   axis: AxisSegment[];
   compressed: boolean;
+  /** The reader's chosen gutter, or null to take the responsive default. */
+  labelWidth: number | null;
+  onLabelWidthChange?: (width: number) => void;
+  onLabelWidthCommit?: () => void;
+  onLabelWidthReset?: () => void;
 }) {
   const { ref, width } = useContainerWidth();
   const [hover, setHover] = useState<HoverState | null>(null);
@@ -163,17 +175,23 @@ export function Timeline({
 
   const { rows, height } = useMemo(() => layout(parents), [parents]);
 
-  const plotWidth = Math.max(MIN_PLOT_WIDTH, width - LABEL_WIDTH - PADDING_RIGHT);
-  const totalWidth = LABEL_WIDTH + plotWidth + PADDING_RIGHT;
+  const labelWidth =
+    width === 0
+      ? (requested ?? 0)
+      : requested === null
+        ? defaultGutter(width)
+        : clampGutter(requested, width);
+  const plotWidth = Math.max(MIN_PLOT_WIDTH, width - labelWidth - PADDING_RIGHT);
+  const totalWidth = labelWidth + plotWidth + PADDING_RIGHT;
   const totalHeight = AXIS_HEIGHT + height + 8;
 
   const scale = useMemo(() => {
-    const linear = buildLinearScale(start.getTime(), end.getTime(), LABEL_WIDTH, plotWidth);
+    const linear = buildLinearScale(start.getTime(), end.getTime(), labelWidth, plotWidth);
     if (!compressed) return linear;
     // An axis the server did not send, or one that cannot compress (all
     // off-hours, or bands wider than the plot), falls back to linear.
-    return buildCompressedScale(axis, LABEL_WIDTH, plotWidth) ?? linear;
-  }, [axis, compressed, start, end, plotWidth]);
+    return buildCompressedScale(axis, labelWidth, plotWidth) ?? linear;
+  }, [axis, compressed, start, end, labelWidth, plotWidth]);
 
   const ticks = useMemo(() => dayTicks(start, end), [start, end]);
   const isCompressed = scale.segments.length > 1;
@@ -248,8 +266,8 @@ export function Timeline({
               ),
             )}
             <line
-              x1={LABEL_WIDTH}
-              x2={LABEL_WIDTH + plotWidth}
+              x1={labelWidth}
+              x2={labelWidth + plotWidth}
               y1={AXIS_HEIGHT - 6}
               y2={AXIS_HEIGHT - 6}
               stroke="var(--gridline)"
@@ -277,8 +295,8 @@ export function Timeline({
               );
             })}
             <line
-              x1={LABEL_WIDTH}
-              x2={LABEL_WIDTH + plotWidth}
+              x1={labelWidth}
+              x2={labelWidth + plotWidth}
               y1={AXIS_HEIGHT - 6}
               y2={AXIS_HEIGHT - 6}
               stroke="var(--gridline)"
@@ -292,9 +310,15 @@ export function Timeline({
 
           if (row.kind === "group") {
             const headingBar = row.intervals ?? [];
-            // A heading with a bar has only the gutter to write in; one without
-            // may run the full width, since nothing is drawn beside it.
-            const titleLimit = headingBar.length === 0 ? 40 : row.inScope === false ? 16 : 34;
+            // Headings stay inside the gutter, as rows do. They were once
+            // allowed the full width when no bar sat beside them, which the
+            // character limit made theoretical — measured, they cross the axis
+            // and read as a rendering fault, and the boundary now means
+            // something the reader can take hold of. The out-of-scope note
+            // shares the gutter only when a bar has taken the plot edge.
+            const note = row.inScope === false && headingBar.length > 0 ? "not committed" : "";
+            const titleWidth =
+              labelWidth - LABEL_GAP - (note ? measure(note, NOTE_FONT) + LABEL_GAP : 0);
             return (
               <g key={`group-${row.key}`}>
                 {headingBar.map((interval, index) => {
@@ -324,14 +348,14 @@ export function Timeline({
                   fill="var(--text-primary)"
                 >
                   <title>{row.label}</title>
-                  {truncate(row.label, titleLimit)}
+                  {fit(row.label, HEADING_FONT, titleWidth)}
                 </text>
                 {row.inScope === false && (
                   // Right-aligned inside the gutter when the heading carries a
                   // bar, since the plot edge is occupied; at the plot edge
                   // otherwise, where there is nothing to collide with.
                   <text
-                    x={headingBar.length === 0 ? LABEL_WIDTH + plotWidth : LABEL_WIDTH - 10}
+                    x={headingBar.length === 0 ? labelWidth + plotWidth : labelWidth - 10}
                     y={y + GROUP_HEADER_HEIGHT - 10}
                     fontSize={11}
                     textAnchor="end"
@@ -352,7 +376,13 @@ export function Timeline({
               <text x={12} y={barY + BAR_HEIGHT - 2} fontSize={12} fill="var(--text-secondary)">
                 <title>{`${row.label} — ${row.sublabel ?? ""}`}</title>
                 <tspan fill="var(--text-primary)">{row.label}</tspan>
-                <tspan dx={6}>{truncate(row.sublabel ?? "", 26)}</tspan>
+                <tspan dx={6}>
+                  {fit(
+                    row.sublabel ?? "",
+                    ROW_FONT,
+                    labelWidth - 12 - measure(row.label, ROW_FONT) - 6 - LABEL_GAP,
+                  )}
+                </tspan>
               </text>
 
               {intervals
@@ -443,6 +473,16 @@ export function Timeline({
           </div>
           <div className="muted">{formatDuration(hover.interval.from, hover.interval.to)}</div>
         </div>
+      )}
+
+      {onLabelWidthChange && onLabelWidthCommit && onLabelWidthReset && (
+        <GutterDivider
+          x={labelWidth}
+          height={totalHeight}
+          onChange={onLabelWidthChange}
+          onCommit={onLabelWidthCommit}
+          onReset={onLabelWidthReset}
+        />
       )}
     </div>
   );
