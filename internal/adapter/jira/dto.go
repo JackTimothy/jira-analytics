@@ -29,8 +29,18 @@ type sprintJSON struct {
 // numeric field ids differ.
 const sprintFieldSchema = "com.pyxis.greenhopper.jira:gh-sprint"
 
+// storyPointsSchema is the estimate field a company-managed project uses. A
+// team-managed one has no such schema and is matched by name instead, which is
+// why discovery tries both.
+const storyPointsSchema = "com.pyxis.greenhopper.jira:gh-story-points"
+
+// storyPointsNames are what the estimate field is called when its schema does
+// not identify it. Lowercased for comparison.
+var storyPointsNames = []string{"story points", "story point estimate"}
+
 type fieldJSON struct {
 	ID     string `json:"id"`
+	Name   string `json:"name"`
 	Schema struct {
 		Custom string `json:"custom"`
 	} `json:"schema"`

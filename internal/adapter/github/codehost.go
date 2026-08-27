@@ -150,6 +150,15 @@ func (c *CodeHost) LinkedEvents(
 		return nil, err
 	}
 
+	// Repositories, pull requests and branches are all read concurrently, so
+	// the order events land in is whatever the network decided. The timeline
+	// sorts before replaying and does not care, but an unstable order makes
+	// the API response differ between identical builds and makes any
+	// comparison of two runs — a parity test between transports, most of all —
+	// fail for a reason that is not a difference.
+	for key := range results {
+		domain.SortEvents(results[key])
+	}
 	return results, nil
 }
 

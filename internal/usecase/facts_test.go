@@ -180,3 +180,83 @@ func TestBuildFetchesTheWholeSprintWhateverScopeWasAskedFor(t *testing.T) {
 			asked[domain.ScopeCommitted], asked[domain.ScopeAll])
 	}
 }
+
+// The burndown answers the same scope question as the timeline, so the toggle
+// has to move both. The fixture's PROJ-2 has no due date and so is out of the
+// committed scope; its points must leave the total with it.
+func TestBurndownFollowsTheScopeToggle(t *testing.T) {
+	totals := map[domain.Scope]float64{}
+
+	for _, scope := range []domain.Scope{domain.ScopeAll, domain.ScopeCommitted} {
+		projects, tracker, code := buildFixture()
+		tracker.parents[0].Points = 5 // PROJ-1, committed
+		tracker.parents[1].Points = 3 // PROJ-2, no due date
+
+		result, err := NewRetrospective(projects, tracker, code).
+			Build(context.Background(), RetrospectiveRequest{ProjectID: "activation", SprintID: "100", Scope: scope})
+		if err != nil {
+			t.Fatalf("Build(%s): %v", scope, err)
+		}
+		totals[scope] = float64(result.Burndown.Total)
+	}
+
+	if totals[domain.ScopeAll] != 8 {
+		t.Errorf("scope=all total = %v, want 8", totals[domain.ScopeAll])
+	}
+	if totals[domain.ScopeCommitted] != 5 {
+		t.Errorf("scope=committed total = %v, want 5 — the uncommitted 3 points should leave with it",
+			totals[domain.ScopeCommitted])
+	}
+}
+
+// The timeline drops a work item with nothing to chart. The burndown must not:
+// a story with no sub-tasks still carries points and still has to be finished.
+func TestBurndownKeepsWorkItemsTheTimelineDrops(t *testing.T) {
+	projects, tracker, code := buildFixture()
+	tracker.parents = append(tracker.parents, domain.WorkItem{
+		Key: "PROJ-3", Summary: "Committed but never broken down",
+		DueDate: dueOn(2026, 8, 17), Created: ts(1, 9), Points: 8,
+	})
+	tracker.parents[0].Points = 5
+
+	result, err := NewRetrospective(projects, tracker, code).
+		Build(context.Background(), RetrospectiveRequest{ProjectID: "activation", SprintID: "100", Scope: domain.ScopeCommitted})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	for _, group := range result.Groups {
+		if group.Parent.Key == "PROJ-3" {
+			t.Error("a parent with no sub-tasks reached the timeline")
+		}
+	}
+	if result.Burndown.Total != 13 {
+		t.Errorf("burndown total = %v, want 13 — the un-broken-down story still counts",
+			result.Burndown.Total)
+	}
+}
+
+// Points come off when the work item's own status reaches a done category, so
+// the parents' history has to be fetched, not only the sub-tasks'.
+func TestBurndownBurnsOnTheWorkItemsOwnStatus(t *testing.T) {
+	projects, tracker, code := buildFixture()
+	tracker.parents[0].Points = 5
+	tracker.parents[0].Status = statusDone
+	tracker.history["PROJ-1"] = []domain.StatusChange{
+		{At: ts(6, 9), From: statusInProgress, To: statusDone},
+	}
+
+	result, err := NewRetrospective(projects, tracker, code).
+		Build(context.Background(), RetrospectiveRequest{ProjectID: "activation", SprintID: "100", Scope: domain.ScopeCommitted})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	line := result.Burndown.Remaining
+	if line[0].Remaining != 5 {
+		t.Errorf("remaining at the start = %v, want 5", line[0].Remaining)
+	}
+	if last := line[len(line)-1].Remaining; last != 0 {
+		t.Errorf("remaining at the end = %v, want 0 — PROJ-1 was finished mid-sprint", last)
+	}
+}

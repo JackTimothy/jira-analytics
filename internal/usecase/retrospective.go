@@ -96,13 +96,42 @@ func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (do
 		return domain.Retrospective{Sprint: sprint, Groups: nil, Axis: axis}, nil
 	}
 
-	history, codeEvents, err := r.facts(ctx, trace, project, subTaskKeysOf(subTasks), sprint.Window())
+	// The parents' own history is asked for alongside the sub-tasks'. The
+	// burndown needs to know when each work item was finished, and the tracker
+	// answers for a hundred keys at a time — so this is one query either way,
+	// and asking twice would be the only way to make it cost anything.
+	history, codeEvents, err := r.facts(ctx, trace, project,
+		append(keysOf(parents), subTaskKeysOf(subTasks)...), sprint.Window())
 	if err != nil {
 		return domain.Retrospective{}, err
 	}
 
 	inScope := selectScope(parents, sprint, location, req.Scope)
-	return r.assemble(sprint, location, project.Settings.Schedule(), inScope, subTasks, history, codeEvents), nil
+
+	retrospective := r.assemble(sprint, location, project.Settings.Schedule(), inScope, subTasks, history, codeEvents)
+	retrospective.Burndown = domain.BuildBurndown(
+		burndownItems(inScope, history), sprint, project.Settings.Schedule(), location)
+	return retrospective, nil
+}
+
+// burndownItems turns the selected work items into what the burndown needs.
+//
+// It runs on the scope selection rather than on the assembled groups, so the
+// two views answer the same question about scope while disagreeing about rows:
+// the timeline drops a work item with nothing to chart, and the burndown must
+// not — a story with no sub-tasks still carries points and still has to be
+// finished.
+func burndownItems(parents []domain.WorkItem, history map[domain.IssueKey][]domain.StatusChange) []domain.BurndownItem {
+	items := make([]domain.BurndownItem, 0, len(parents))
+	for _, parent := range parents {
+		items = append(items, domain.BurndownItem{
+			Key:     parent.Key,
+			Points:  parent.Points,
+			Status:  parent.Status,
+			Changes: history[parent.Key],
+		})
+	}
+	return items
 }
 
 // facts gathers the planning history and the delivery events together.

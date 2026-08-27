@@ -95,6 +95,17 @@ const subTasksResponse = `{"issues":[
 	 "issuetype":{"subtask":true},"parent":{"key":"PROJ-3"},
 	 "status":{"id":"10024","name":"Done","statusCategory":{"key":"done"}}}}]}`
 
+// jqlOf pulls the query out of a search request for the request log.
+func jqlOf(body []byte) string {
+	var request struct {
+		JQL string `json:"jql"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return "?"
+	}
+	return request.JQL
+}
+
 func routeJQL(body []byte) (string, bool) {
 	var request struct {
 		JQL string `json:"jql"`
@@ -177,6 +188,9 @@ func fakeAPIRecording(t *testing.T, routes map[string]string, seen *requestLog) 
 		}
 		if r.Method == http.MethodPost && r.URL.Path == "/rest/api/3/search/jql" {
 			raw, _ := io.ReadAll(r.Body)
+			// Record the query itself, not just the path: three different
+			// searches share this endpoint and only one of them is the scan.
+			seen.record("JQL " + jqlOf(raw))
 			body, ok := routeJQL(raw)
 			if !ok {
 				w.WriteHeader(http.StatusBadRequest)
@@ -264,16 +278,21 @@ projects:
 
 // The whole-project scan is what a retrospective used to pay to learn two
 // timestamps: one request per hundred issues that have ever been in a sprint.
-// Asserting on the field lookup is the sharpest available proxy, since it is
-// the scan's unavoidable first step and nothing else in the build needs it.
+//
+// The assertion is on the scan's own query rather than on the field lookup that
+// precedes it, because the field listing is now also how the estimate field is
+// discovered — a proxy that was sharp when it was written and stopped being so
+// the moment something else needed the same endpoint.
 func TestRetrospectiveNeverScansTheProjectToFindItsSprint(t *testing.T) {
 	handler, jiraCalls := buildStackRecording(t)
 
 	if body := fetch(t, handler, "/api/v1/projects/team/sprints/7354/retrospective"); body.Sprint.Name != "Sprint 26-31" {
 		t.Fatalf("sprint = %+v", body.Sprint)
 	}
-	if jiraCalls.contains("GET /rest/api/3/field") {
-		t.Error("the sprint field was looked up, so the project scan ran after all")
+	for _, call := range jiraCalls.snapshot() {
+		if strings.Contains(call, "sprint IS NOT EMPTY") {
+			t.Errorf("the project scan ran after all: %s", call)
+		}
 	}
 	if !jiraCalls.contains("GET /rest/agile/1.0/sprint/7354") {
 		t.Error("the sprint was not fetched by id")
@@ -474,6 +493,14 @@ func (l *requestLog) record(call string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.calls = append(l.calls, call)
+}
+
+// snapshot returns a copy, so a caller can range over it without holding the
+// lock through the loop.
+func (l *requestLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.calls...)
 }
 
 func (l *requestLog) contains(call string) bool {

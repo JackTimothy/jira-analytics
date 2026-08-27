@@ -41,10 +41,13 @@ type Tracker struct {
 	statusMu sync.Mutex
 	statuses map[string]domain.IssueStatus
 
-	// sprintFieldMu guards the discovered id of the sprint custom field, which
-	// is numbered differently on every Jira site.
-	sprintFieldMu sync.Mutex
-	sprintField   string
+	// fieldMu guards the discovered ids of the custom fields this adapter
+	// needs. Both are numbered differently on every Jira site, so both are
+	// resolved at runtime from one listing.
+	fieldMu          sync.Mutex
+	fieldsResolved   bool
+	sprintField      string
+	storyPointsField string
 
 	// sprintsMu guards the per-project sprint list. Building it costs one
 	// request per hundred issues, and the answer changes at most once a sprint.
@@ -283,28 +286,87 @@ func sprintsInIssue(raw json.RawMessage, field string) []sprintJSON {
 	return sprints
 }
 
-// sprintFieldID finds the sprint custom field for this site. Its numeric id is
-// site-specific, so it is discovered by its well-known schema rather than
-// hard-coded.
+// sprintFieldID finds the sprint custom field for this site.
 func (t *Tracker) sprintFieldID(ctx context.Context) (string, error) {
-	t.sprintFieldMu.Lock()
-	defer t.sprintFieldMu.Unlock()
+	if err := t.resolveFields(ctx); err != nil {
+		return "", err
+	}
+	t.fieldMu.Lock()
+	defer t.fieldMu.Unlock()
 
-	if t.sprintField != "" {
-		return t.sprintField, nil
+	if t.sprintField == "" {
+		return "", fmt.Errorf("this Jira site has no sprint field (looked for schema %q)", sprintFieldSchema)
+	}
+	return t.sprintField, nil
+}
+
+// storyPointsFieldID finds the estimate field, or "" if this site has none.
+//
+// Unlike the sprint field, its absence is not an error: a project that does not
+// estimate is a project without a burndown, not a broken one.
+func (t *Tracker) storyPointsFieldID(ctx context.Context) (string, error) {
+	if err := t.resolveFields(ctx); err != nil {
+		return "", err
+	}
+	t.fieldMu.Lock()
+	defer t.fieldMu.Unlock()
+	return t.storyPointsField, nil
+}
+
+// resolveFields discovers the site-specific custom field ids from one listing.
+//
+// Their numeric ids differ per site, so nothing here may be hard-coded — that
+// is the same rule that keeps this repository publishable. The sprint field is
+// identified by its well-known schema. The estimate field is tried by schema
+// first and by name second, because a team-managed project's "Story point
+// estimate" is a plain number field with no schema to recognise it by.
+func (t *Tracker) resolveFields(ctx context.Context) error {
+	t.fieldMu.Lock()
+	resolved := t.fieldsResolved
+	t.fieldMu.Unlock()
+	if resolved {
+		return nil
 	}
 
 	var fields []fieldJSON
 	if err := t.client.DoJSON(ctx, t.request(http.MethodGet, "/rest/api/3/field", nil, nil), &fields); err != nil {
-		return "", fmt.Errorf("loading field definitions: %w", err)
+		return fmt.Errorf("loading field definitions: %w", err)
 	}
+
+	var sprint, points, pointsByName string
 	for _, field := range fields {
-		if field.Schema.Custom == sprintFieldSchema {
-			t.sprintField = field.ID
-			return t.sprintField, nil
+		switch {
+		case field.Schema.Custom == sprintFieldSchema:
+			sprint = field.ID
+		case field.Schema.Custom == storyPointsSchema:
+			points = field.ID
+		case pointsByName == "" && matchesStoryPointsName(field.Name):
+			pointsByName = field.ID
 		}
 	}
-	return "", fmt.Errorf("this Jira site has no sprint field (looked for schema %q)", sprintFieldSchema)
+	if points == "" {
+		points = pointsByName
+	}
+
+	t.fieldMu.Lock()
+	t.sprintField, t.storyPointsField, t.fieldsResolved = sprint, points, true
+	t.fieldMu.Unlock()
+
+	if points == "" {
+		t.logger.Warn("this Jira site has no story point field, so sprints have no burndown",
+			slog.String("looked_for_schema", storyPointsSchema),
+			slog.Any("or_named", storyPointsNames))
+	}
+	return nil
+}
+
+func matchesStoryPointsName(name string) bool {
+	for _, candidate := range storyPointsNames {
+		if strings.EqualFold(strings.TrimSpace(name), candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *Tracker) cachedSprints(projectKey string) ([]domain.Sprint, bool) {
@@ -343,16 +405,32 @@ func (t *Tracker) storeSprints(projectKey string, sprints []domain.Sprint) {
 func (t *Tracker) SprintParents(ctx context.Context, tracker domain.TrackerRef, sprint domain.SprintID) ([]domain.WorkItem, error) {
 	jql := fmt.Sprintf("sprint = %s AND project = %q ORDER BY key ASC", string(sprint), tracker.ProjectKey)
 
+	// The estimate field is site-specific, so it is asked for by its
+	// discovered id and read out of the raw JSON. A site without one simply
+	// yields unestimated work items rather than an error.
+	points, err := t.storyPointsFieldID(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	fields := []string{"summary", "duedate", "created", "status", "issuetype"}
+	if points != "" {
+		fields = append(fields, points)
+	}
+
 	var parents []domain.WorkItem
-	err := t.eachSearchPage(ctx, jql, []string{"summary", "duedate", "created", "status", "issuetype"}, "",
-		func(issues []issueJSON, _ []json.RawMessage) error {
-			for _, issue := range issues {
+	err = t.eachSearchPage(ctx, jql, fields, "",
+		func(issues []issueJSON, raw []json.RawMessage) error {
+			for i, issue := range issues {
 				if issue.Fields.IssueType.Subtask {
 					continue
 				}
 				item, err := issue.toWorkItem()
 				if err != nil {
 					return err
+				}
+				if points != "" {
+					item.Points = pointsInIssue(raw[i], points)
 				}
 				parents = append(parents, item)
 			}
@@ -362,6 +440,33 @@ func (t *Tracker) SprintParents(ctx context.Context, tracker domain.TrackerRef, 
 		return nil, err
 	}
 	return parents, nil
+}
+
+// pointsInIssue reads the estimate out of an issue's raw JSON.
+//
+// The field id is discovered at runtime and so cannot be given a struct tag,
+// the same reason the sprint field is read this way. A missing or unparseable
+// value is zero — unestimated — because refusing the whole sprint over one
+// malformed estimate would be a poor trade.
+func pointsInIssue(raw json.RawMessage, field string) domain.Points {
+	var envelope struct {
+		Fields map[string]json.RawMessage `json:"fields"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return 0
+	}
+	value, ok := envelope.Fields[field]
+	if !ok {
+		return 0
+	}
+	var points float64
+	if err := json.Unmarshal(value, &points); err != nil {
+		return 0
+	}
+	if points < 0 {
+		return 0
+	}
+	return domain.Points(points)
 }
 
 // eachSearchPage walks a JQL search, handing each page to fn. Both the decoded
@@ -434,6 +539,7 @@ func (i issueJSON) toWorkItem() (domain.WorkItem, error) {
 		Summary: i.Fields.Summary,
 		DueDate: due,
 		Created: created,
+		Status:  i.Fields.Status.toDomain(),
 	}, nil
 }
 

@@ -36,6 +36,11 @@ func newFakeJira(t *testing.T, routes map[string]string) (*Tracker, *requestLog)
 			return
 		}
 		body, ok := routes[r.URL.Path]
+		if !ok && r.URL.Path == "/rest/api/3/field" {
+			// Field discovery is a prerequisite for most calls now, so the
+			// fake answers it unless a test deliberately overrides it.
+			body, ok = fieldsFixture, true
+		}
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			io.WriteString(w, `{"errorMessages":["no fixture for `+r.URL.Path+`"]}`)
@@ -90,8 +95,9 @@ func (l *requestLog) count(call string) int {
 }
 
 const fieldsFixture = `[
-  {"id": "summary", "schema": {"type": "string"}},
-  {"id": "customfield_10020", "schema": {"type": "array", "custom": "com.pyxis.greenhopper.jira:gh-sprint"}}
+  {"id": "summary", "name": "Summary", "schema": {"type": "string"}},
+  {"id": "customfield_10020", "name": "Sprint", "schema": {"type": "array", "custom": "com.pyxis.greenhopper.jira:gh-sprint"}},
+  {"id": "customfield_10059", "name": "Story Points", "schema": {"type": "number", "custom": "com.pyxis.greenhopper.jira:gh-story-points"}}
 ]`
 
 // Two issues carrying overlapping sprint membership, exactly as Jira reports
@@ -351,6 +357,10 @@ func TestStatusHistoryFetchesStatusDefinitionsOnlyOnce(t *testing.T) {
 func TestSubTasksOfSendsAParentInQuery(t *testing.T) {
 	var received map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/api/3/field" {
+			io.WriteString(w, fieldsFixture)
+			return
+		}
 		json.NewDecoder(r.Body).Decode(&received)
 		io.WriteString(w, `{"issues":[]}`)
 	}))
@@ -372,6 +382,10 @@ func TestSprintParentsScopesToTheProject(t *testing.T) {
 	// say so, or a retrospective silently mixes them in.
 	var received map[string]any
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/rest/api/3/field" {
+			io.WriteString(w, fieldsFixture)
+			return
+		}
 		json.NewDecoder(r.Body).Decode(&received)
 		io.WriteString(w, `{"issues":[]}`)
 	}))

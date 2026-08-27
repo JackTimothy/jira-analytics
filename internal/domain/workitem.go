@@ -14,6 +14,16 @@ type WorkItem struct {
 	Summary string
 	DueDate *CalendarDate
 	Created time.Time
+
+	// Points is the estimate the burndown is built from. Estimates live at
+	// this level and not on sub-tasks, which is why the burndown is the one
+	// view built from parents rather than from the rows beneath them.
+	// Zero means unestimated; nothing is estimated at zero.
+	Points Points
+
+	// Status is what the item holds now. With no recorded transitions it is
+	// the only evidence of whether the item was finished during the sprint.
+	Status IssueStatus
 }
 
 // SubTask is the unit the retrospective charts. It is the only level at which

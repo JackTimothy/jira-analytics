@@ -24,6 +24,10 @@ type Retrospective struct {
 	// project's timezone — what lets the client compress dead time while
 	// keeping off-hours transitions visible.
 	Axis []AxisSegment
+
+	// Burndown is the same sprint measured in points rather than in states. It
+	// follows the same scope selection as Groups, so the toggle moves both.
+	Burndown Burndown
 }
 
 // Scope selects which parents appear in a retrospective.

@@ -136,6 +136,40 @@ type retrospectiveView struct {
 	Parents  []parentView      `json:"parents"`
 	Warnings []string          `json:"warnings"`
 	Axis     []axisSegmentView `json:"axis"`
+	Burndown burndownView      `json:"burndown"`
+}
+
+type burndownView struct {
+	Total       float64             `json:"total"`
+	Remaining   []burndownPointView `json:"remaining"`
+	Ideal       []burndownPointView `json:"ideal"`
+	Unestimated []string            `json:"unestimated"`
+}
+
+type burndownPointView struct {
+	At        time.Time `json:"at"`
+	Remaining float64   `json:"remaining"`
+}
+
+func presentBurndown(b domain.Burndown) burndownView {
+	view := burndownView{
+		Total:       float64(b.Total),
+		Remaining:   presentBurndownPoints(b.Remaining),
+		Ideal:       presentBurndownPoints(b.Ideal),
+		Unestimated: make([]string, 0, len(b.Unestimated)),
+	}
+	for _, key := range b.Unestimated {
+		view.Unestimated = append(view.Unestimated, string(key))
+	}
+	return view
+}
+
+func presentBurndownPoints(points []domain.BurndownPoint) []burndownPointView {
+	out := make([]burndownPointView, 0, len(points))
+	for _, point := range points {
+		out = append(out, burndownPointView{At: point.At, Remaining: float64(point.Remaining)})
+	}
+	return out
 }
 
 type axisSegmentView struct {
@@ -217,5 +251,6 @@ func presentRetrospective(r domain.Retrospective) retrospectiveView {
 		Parents:  parents,
 		Warnings: warnings,
 		Axis:     presentAxis(r.Axis),
+		Burndown: presentBurndown(r.Burndown),
 	}
 }
