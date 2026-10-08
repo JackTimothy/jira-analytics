@@ -1,0 +1,33 @@
+// A container with everything `make` needs: Go for the server, Node for the
+// client, and gcc for `go test -race`. The repository is mounted as the
+// workspace, so a .env and projects.yaml at the root are read as usual —
+// credentials stay in those gitignored files rather than in this one.
+{
+  "name": "delivery-analytics",
+  "image": "mcr.microsoft.com/devcontainers/go:1.24-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/node:1": { "version": "22" }
+  },
+
+  // 8080 is the Go server (`make run`); 5173 is Vite (`make dev`), which
+  // proxies /api to 8080.
+  "forwardPorts": [8080, 5173],
+  "portsAttributes": {
+    "8080": { "label": "server" },
+    "5173": { "label": "vite", "onAutoForward": "openBrowser" }
+  },
+
+  "postCreateCommand": "go mod download && make web/node_modules",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "golang.go",
+        "mhutchie.git-graph",
+        "anthropic.claude-code"
+      ]
+    }
+  },
+
+  "remoteUser": "vscode"
+}
