@@ -18,6 +18,11 @@ type ProjectSettings struct {
 	// schedule; a configured value must validate.
 	WorkingHours *WorkingHours
 
+	// Holidays are days with no working hours. They sit beside WorkingHours
+	// rather than inside it so a project on the default schedule can still
+	// have them.
+	Holidays []Holiday
+
 	// TypesLast names the tracker's issue types that belong at the bottom of
 	// the chart — a support queue, chores, anything a reader scrolls past to
 	// reach the work the sprint was about. Matched against the issue type by
@@ -29,12 +34,15 @@ type ProjectSettings struct {
 	TypesLast []string
 }
 
-// Schedule resolves the configured working hours, defaulting when unset.
+// Schedule resolves the configured working hours, defaulting when unset, with
+// the project's holidays taken out.
 func (s ProjectSettings) Schedule() WorkingHours {
-	if s.WorkingHours == nil {
-		return DefaultWorkingHours()
+	hours := DefaultWorkingHours()
+	if s.WorkingHours != nil {
+		hours = *s.WorkingHours
 	}
-	return *s.WorkingHours
+	hours.Holidays = s.Holidays
+	return hours
 }
 
 // Validate checks everything a settings write must satisfy.
@@ -43,7 +51,16 @@ func (s ProjectSettings) Validate() error {
 		return err
 	}
 	if s.WorkingHours != nil {
-		return s.WorkingHours.Validate()
+		if err := s.WorkingHours.Validate(); err != nil {
+			return err
+		}
+	}
+	seen := map[CalendarDate]bool{}
+	for _, holiday := range s.Holidays {
+		if seen[holiday.Date] {
+			return fmt.Errorf("%w: %s is listed as a holiday twice", ErrInvalidSettings, holiday.Date)
+		}
+		seen[holiday.Date] = true
 	}
 	return nil
 }

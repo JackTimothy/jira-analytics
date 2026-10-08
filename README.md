@@ -46,8 +46,8 @@ is reopened puts its points back on the chart and takes them off again when it
 finishes for good. Work carried over already finished when the sprint opened
 counts toward the total but never toward what was left to do.
 
-The ideal line descends only during working hours, flat across nights and
-weekends, from the same schedule the timeline's axis uses. A calendar-time ideal
+The ideal line descends only during working hours, flat across nights,
+weekends and holidays, from the same schedule the timeline's axis uses. A calendar-time ideal
 shows a team falling behind every Saturday and catching up every Monday, which
 says nothing about them. On the compressed axis it is a straight line, which is
 the same fact seen from the other side.
@@ -64,8 +64,8 @@ sprint field's own history would fix.
 How long finished work took, counted in working hours only. The clock starts
 the first time a work item's own status enters an in-progress status — however
 long before the sprint that was — and stops the last time it reaches Done.
-Nights and weekends are taken out using the same schedule and timezone as the
-timeline's axis, so a story picked up on Friday afternoon and finished on Monday
+Nights, weekends and holidays are taken out using the same schedule and timezone
+as the timeline's axis, so a story picked up on Friday afternoon and finished on Monday
 morning took a few hours, not three days.
 
 Only Stories, Tasks and Bugs are measured, and only on reaching the status named
@@ -86,9 +86,20 @@ that finished with no estimate, and items moved straight to Done without ever
 being marked in progress, cannot contribute, and are named under the figure
 rather than silently left out.
 
-There is no holiday calendar, so a bank holiday counts as a working day. A
-sprint ends at its planned end date, not when someone pressed Complete. Branches
+A sprint ends at its planned end date, not when someone pressed Complete. Branches
 and sub-tasks do not start the clock; only the work item's own status does.
+
+### Holidays
+
+Each project lists its own holidays, in the settings panel or under `holidays`
+in `projects.yaml`. A holiday is a whole day in the project's timezone with an
+optional name, and it counts as no working hours everywhere working hours are
+used: the compressed axis, the burndown's ideal line and cycle time. A shutdown
+of several days is several dates.
+
+On the compressed timeline a holiday joins the off-hours band around it, the way
+a weekend does, and the band is labelled "Hol" with the holiday named on hover.
+A holiday that falls on a day off anyway takes nothing away and is not marked.
 
 ### The seven states
 
@@ -252,7 +263,8 @@ GET   /api/v1/projects
 GET   /api/v1/projects/{projectID}
 PATCH /api/v1/projects/{projectID}/settings
       {"timezone": "America/New_York",
-       "workingHours": {"days": ["monday","tuesday"], "start": "08:00", "end": "18:00"}}
+       "workingHours": {"days": ["monday","tuesday"], "start": "08:00", "end": "18:00"},
+       "holidays": [{"date": "2026-11-26", "name": "Thanksgiving"}]}
 GET   /api/v1/projects/{projectID}/sprints
 GET   /api/v1/projects/{projectID}/sprints/{sprintID}/retrospective?scope=all|committed
 ```

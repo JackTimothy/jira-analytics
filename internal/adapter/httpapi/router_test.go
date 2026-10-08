@@ -331,6 +331,93 @@ func TestProjectsExposeTheScheduleWithDefaults(t *testing.T) {
 	}
 }
 
+func TestUpdateSettingsAppliesHolidays(t *testing.T) {
+	server, projects, _ := newTestServer()
+	rec := do(t, server, http.MethodPatch, "/api/v1/projects/activation/settings",
+		`{"holidays":[{"date":"2026-11-26","name":"Thanksgiving"},{"date":"2026-12-25"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body)
+	}
+
+	applied := projects.updates[0]
+	if len(applied.Holidays) != 2 ||
+		applied.Holidays[0] != (domain.Holiday{Date: domain.NewCalendarDate(2026, 11, 26), Name: "Thanksgiving"}) ||
+		applied.Holidays[1] != (domain.Holiday{Date: domain.NewCalendarDate(2026, 12, 25)}) {
+		t.Errorf("stored holidays %+v", applied.Holidays)
+	}
+	// Neither the timezone nor the working hours were in the patch.
+	if applied.Timezone != "America/New_York" || applied.WorkingHours != nil {
+		t.Errorf("other settings changed: %+v", applied)
+	}
+
+	var got projectView
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if len(got.Settings.Holidays) != 2 || got.Settings.Holidays[0] != (holidayView{Date: "2026-11-26", Name: "Thanksgiving"}) {
+		t.Errorf("response holidays = %+v", got.Settings.Holidays)
+	}
+
+	// An empty list clears them; a patch without the field leaves them alone.
+	do(t, server, http.MethodPatch, "/api/v1/projects/activation/settings", `{"timezone":"Europe/London"}`)
+	if len(projects.updates[1].Holidays) != 2 {
+		t.Errorf("a patch without holidays dropped them: %+v", projects.updates[1].Holidays)
+	}
+	do(t, server, http.MethodPatch, "/api/v1/projects/activation/settings", `{"holidays":[]}`)
+	if len(projects.updates[2].Holidays) != 0 {
+		t.Errorf("an empty list left %+v", projects.updates[2].Holidays)
+	}
+}
+
+func TestUpdateSettingsRejectsMalformedHolidays(t *testing.T) {
+	server, _, _ := newTestServer()
+	for name, body := range map[string]string{
+		"not a date":  `{"holidays":[{"date":"26/11/2026"}]}`,
+		"no date":     `{"holidays":[{"name":"Someday"}]}`,
+		"no such day": `{"holidays":[{"date":"2026-02-30"}]}`,
+	} {
+		rec := do(t, server, http.MethodPatch, "/api/v1/projects/activation/settings", body)
+		if rec.Code != http.StatusUnprocessableEntity {
+			t.Errorf("%s: got %d, want 422: %s", name, rec.Code, rec.Body)
+		}
+	}
+}
+
+// A project with no holidays says so with an empty list, not null.
+func TestProjectsExposeAnEmptyHolidayList(t *testing.T) {
+	server, _, _ := newTestServer()
+	rec := do(t, server, http.MethodGet, "/api/v1/projects/activation", "")
+	if !strings.Contains(rec.Body.String(), `"holidays":[]`) {
+		t.Errorf("expected an empty holiday list in %s", rec.Body)
+	}
+}
+
+func TestRetrospectivePresentsTheHolidaysOnTheAxis(t *testing.T) {
+	server, _, retros := newTestServer()
+	from := time.Date(2026, 9, 4, 22, 0, 0, 0, time.UTC)
+	retros.result = domain.Retrospective{
+		Sprint: domain.Sprint{ID: "100", Name: "Sprint 26-31"},
+		Axis: []domain.AxisSegment{
+			{From: from.Add(-4 * time.Hour), To: from, Kind: domain.SegmentWorking},
+			{From: from, To: from.Add(82 * time.Hour), Kind: domain.SegmentOffHours, Holidays: []domain.Holiday{
+				{Date: domain.NewCalendarDate(2026, 9, 7), Name: "Labor Day"},
+			}},
+		},
+	}
+
+	rec := do(t, server, http.MethodGet, "/api/v1/projects/activation/sprints/100/retrospective", "")
+	var got retrospectiveView
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if len(got.Axis) != 2 || got.Axis[0].Holidays != nil {
+		t.Fatalf("axis = %+v, want a working segment with no holidays first", got.Axis)
+	}
+	if h := got.Axis[1].Holidays; len(h) != 1 || h[0] != (holidayView{Date: "2026-09-07", Name: "Labor Day"}) {
+		t.Errorf("band holidays = %+v, want Labor Day", h)
+	}
+}
+
 func TestRetrospectivePresentsCycleTime(t *testing.T) {
 	server, _, retros := newTestServer()
 	story := domain.WorkItem{Key: "PROJ-1", Summary: "Story", Type: "Story", Points: 2}

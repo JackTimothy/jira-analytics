@@ -593,11 +593,11 @@ func TestRetrospectiveChartsASprintWithNoSubTasks(t *testing.T) {
 	}
 }
 
-// Cycle time end to end: Jira's status ids and offset timestamps have to
-// survive translation, and the project's timezone has to decide what counts as
-// working time. PROJ-4 is a Task moved into progress at 09:00 on Tuesday and
-// to Done at 13:00 on Wednesday, Eastern: 9 working hours, then 5.
-func TestRetrospectiveMeasuresCycleTimeInWorkingHours(t *testing.T) {
+// cycleTimeStack serves a sprint in which PROJ-4, a Task, was moved into
+// progress at 09:00 on Tuesday 4 Aug and to Done at 13:00 on Wednesday 5 Aug,
+// Eastern.
+func cycleTimeStack(t *testing.T) http.Handler {
+	t.Helper()
 	parents := strings.Replace(sprintParentsResponse,
 		`"customfield_10059":8,
 	 "status":{"id":"10039","name":"To Do","statusCategory":{"key":"new"}}`,
@@ -622,8 +622,14 @@ func TestRetrospectiveMeasuresCycleTimeInWorkingHours(t *testing.T) {
 		}
 		return routeJQL(jql)
 	})
+	return handler
+}
 
-	body := fetch(t, handler, "/api/v1/projects/team/sprints/7354/retrospective")
+// Cycle time end to end: Jira's status ids and offset timestamps have to
+// survive translation, and the project's timezone has to decide what counts as
+// working time. PROJ-4 took 9 working hours on Tuesday, then 5 on Wednesday.
+func TestRetrospectiveMeasuresCycleTimeInWorkingHours(t *testing.T) {
+	body := fetch(t, cycleTimeStack(t), "/api/v1/projects/team/sprints/7354/retrospective")
 
 	for _, parent := range body.Parents {
 		switch {
@@ -638,5 +644,25 @@ func TestRetrospectiveMeasuresCycleTimeInWorkingHours(t *testing.T) {
 	}
 	if got := body.CycleTime.HoursPerPoint; got == nil || *got != 1.75 {
 		t.Errorf("hours per point = %v, want 1.75 — 14 hours over 8 points", got)
+	}
+}
+
+// A holiday set through the API reaches the measurement: with the Tuesday
+// off, PROJ-4's Wednesday morning is all the working time it took.
+func TestRetrospectiveLeavesHolidaysOutOfCycleTime(t *testing.T) {
+	handler := cycleTimeStack(t)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPatch, "/api/v1/projects/team/settings",
+		strings.NewReader(`{"holidays":[{"date":"2026-08-04","name":"Offsite"}]}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PATCH settings -> %d: %s", rec.Code, rec.Body)
+	}
+
+	body := fetch(t, handler, "/api/v1/projects/team/sprints/7354/retrospective")
+	for _, parent := range body.Parents {
+		if parent.Key == "PROJ-4" && (parent.CycleTime == nil || parent.CycleTime.Hours != 5) {
+			t.Errorf("PROJ-4 cycle time = %+v, want 5 hours", parent.CycleTime)
+		}
 	}
 }

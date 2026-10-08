@@ -30,6 +30,13 @@ projects:
         start: "08:00"
         end: "18:00"
 
+      # Whole days with no working hours, in the timezone above. They are
+      # left out of the compressed axis, the burndown's ideal line and cycle
+      # time. The name is optional and shown on the chart. Omit for none.
+      # holidays:
+      #   - { date: 2026-11-26, name: Thanksgiving }
+      #   - { date: 2026-12-25, name: Christmas Day }
+
       # Issue types to sort to the bottom of the chart: a support queue,
       # chores — whatever a reader scrolls past to reach the work the sprint
       # was about. Matched by name, case-insensitively. Omit to keep the

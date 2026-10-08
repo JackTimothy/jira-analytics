@@ -260,3 +260,80 @@ projects:
 		t.Fatal("expected an error for start after end")
 	}
 }
+
+func TestHolidaysRoundTripThroughTheFile(t *testing.T) {
+	// Written by hand, with one date unquoted: YAML would read that as a
+	// timestamp, so this is the case most likely to arrive mangled.
+	store, path := writeStore(t, `
+projects:
+  - id: activation
+    settings:
+      timezone: America/New_York
+      holidays:
+        - { date: 2026-11-26, name: Thanksgiving }
+        - { date: "2026-12-25" }
+    tracker: { type: jira, projectKey: PROJ }
+    repos: [{host: github, owner: o, name: r}]
+`)
+	ctx := context.Background()
+
+	project, err := store.Get(ctx, "activation")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	want := []domain.Holiday{
+		{Date: domain.NewCalendarDate(2026, 11, 26), Name: "Thanksgiving"},
+		{Date: domain.NewCalendarDate(2026, 12, 25)},
+	}
+	assertHolidays(t, "loaded", project.Settings.Holidays, want)
+
+	// Writing the settings back and reading the file again keeps them.
+	if err := store.UpdateSettings(ctx, "activation", project.Settings); err != nil {
+		t.Fatalf("UpdateSettings: %v", err)
+	}
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("reloading: %v", err)
+	}
+	project, err = reloaded.Get(ctx, "activation")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	assertHolidays(t, "reloaded", project.Settings.Holidays, want)
+}
+
+func assertHolidays(t *testing.T, stage string, got, want []domain.Holiday) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s: holidays = %v, want %v", stage, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("%s: holiday %d = %v, want %v", stage, i, got[i], want[i])
+		}
+	}
+}
+
+func TestLoadRejectsMalformedHolidays(t *testing.T) {
+	for name, holidays := range map[string]string{
+		"not a date":   `[{ date: "next tuesday" }]`,
+		"no such day":  `[{ date: 2026-02-30 }]`,
+		"listed twice": `[{ date: 2026-12-25 }, { date: 2026-12-25, name: Christmas }]`,
+	} {
+		contents := `
+projects:
+  - id: a
+    settings:
+      holidays: ` + holidays + `
+    tracker: { type: jira, projectKey: X }
+    repos: [{host: github, owner: o, name: r}]
+`
+		path := filepath.Join(t.TempDir(), "projects.yaml")
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}

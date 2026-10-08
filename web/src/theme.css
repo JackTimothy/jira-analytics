@@ -252,6 +252,14 @@ button { font: inherit; color: inherit; cursor: pointer; }
   border: 1px solid var(--border); background: var(--surface); color: var(--text-primary);
 }
 
+/* A plain secondary action, sized to sit beside a field's inputs. */
+.button {
+  padding: 7px 14px; border-radius: 7px;
+  border: 1px solid var(--border); background: var(--surface); color: var(--text-primary);
+}
+
+.button:disabled { color: var(--text-muted); cursor: default; }
+
 table.data { border-collapse: collapse; width: 100%; font-size: 13px; }
 
 table.data th, table.data td {

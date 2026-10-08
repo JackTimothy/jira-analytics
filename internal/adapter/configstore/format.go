@@ -29,6 +29,7 @@ type projectFormat struct {
 type settingsFormat struct {
 	Timezone     string              `yaml:"timezone"`
 	WorkingHours *workingHoursFormat `yaml:"workingHours,omitempty"`
+	Holidays     []holidayFormat     `yaml:"holidays,omitempty"`
 
 	// TypesLast names the issue types that belong at the bottom of the chart —
 	// a support queue, chores. Which types those are is a fact about one team's
@@ -97,6 +98,40 @@ func fromDomainHours(hours *domain.WorkingHours) *workingHoursFormat {
 	}
 	for _, day := range hours.Days {
 		out.Days = append(out.Days, strings.ToLower(day.String()))
+	}
+	return out
+}
+
+// holidayFormat is one day off. The date is ISO-8601, as people write it;
+// YAML would read an unquoted 2026-11-26 as a timestamp, but into a string
+// field it arrives as the text that was written.
+type holidayFormat struct {
+	Date string `yaml:"date"`
+	Name string `yaml:"name,omitempty"`
+}
+
+func holidaysToDomain(formats []holidayFormat) ([]domain.Holiday, error) {
+	if len(formats) == 0 {
+		return nil, nil
+	}
+	holidays := make([]domain.Holiday, 0, len(formats))
+	for i, f := range formats {
+		date, err := domain.ParseCalendarDate(strings.TrimSpace(f.Date))
+		if err != nil {
+			return nil, fmt.Errorf("holidays[%d]: %w", i, err)
+		}
+		holidays = append(holidays, domain.Holiday{Date: date, Name: strings.TrimSpace(f.Name)})
+	}
+	return holidays, nil
+}
+
+func fromDomainHolidays(holidays []domain.Holiday) []holidayFormat {
+	if len(holidays) == 0 {
+		return nil
+	}
+	out := make([]holidayFormat, 0, len(holidays))
+	for _, holiday := range holidays {
+		out = append(out, holidayFormat{Date: holiday.Date.String(), Name: holiday.Name})
 	}
 	return out
 }
@@ -177,9 +212,14 @@ func (p projectFormat) toDomain() (domain.Project, error) {
 	if err != nil {
 		return domain.Project{}, err
 	}
+	holidays, err := holidaysToDomain(p.Settings.Holidays)
+	if err != nil {
+		return domain.Project{}, err
+	}
 	settings := domain.ProjectSettings{
 		Timezone:     p.Settings.Timezone,
 		WorkingHours: workingHours,
+		Holidays:     holidays,
 		TypesLast:    p.Settings.TypesLast,
 	}
 	if err := settings.Validate(); err != nil {
@@ -226,6 +266,7 @@ func fromDomain(projects []domain.Project) fileFormat {
 			Settings: settingsFormat{
 				Timezone:     project.Settings.Timezone,
 				WorkingHours: fromDomainHours(project.Settings.WorkingHours),
+				Holidays:     fromDomainHolidays(project.Settings.Holidays),
 				TypesLast:    project.Settings.TypesLast,
 			},
 			Tracker: trackerFormat{

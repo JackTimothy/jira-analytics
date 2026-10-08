@@ -299,3 +299,83 @@ func TestWorkingDurationCountsOnlyWorkingHours(t *testing.T) {
 		})
 	}
 }
+
+// withHolidays is the default schedule with some days taken out.
+func withHolidays(holidays ...Holiday) WorkingHours {
+	hours := DefaultWorkingHours()
+	hours.Holidays = holidays
+	return hours
+}
+
+func TestAxisSegmentsTakesAHolidayOutOfTheWorkingWeek(t *testing.T) {
+	loc := eastern(t)
+	// Tuesday 11 Aug 2026 09:00 to Thursday 13 Aug 14:00, with the Wednesday off.
+	w := Window{Start: inLoc(loc, 2026, 8, 11, 9, 0), End: inLoc(loc, 2026, 8, 13, 14, 0)}
+	holiday := Holiday{Date: NewCalendarDate(2026, 8, 12), Name: "Offsite"}
+
+	got := AxisSegments(w, withHolidays(holiday), loc)
+	assertTiling(t, w, got)
+
+	// Tuesday night, the whole Wednesday and Thursday's early morning are one
+	// band, as a weekend would be.
+	assertSegments(t, got, []AxisSegment{
+		{From: w.Start, To: inLoc(loc, 2026, 8, 11, 18, 0), Kind: SegmentWorking},
+		{From: inLoc(loc, 2026, 8, 11, 18, 0), To: inLoc(loc, 2026, 8, 13, 8, 0), Kind: SegmentOffHours},
+		{From: inLoc(loc, 2026, 8, 13, 8, 0), To: w.End, Kind: SegmentWorking},
+	})
+	if len(got[1].Holidays) != 1 || got[1].Holidays[0] != holiday {
+		t.Errorf("band holidays = %v, want just %v", got[1].Holidays, holiday)
+	}
+	if len(got[0].Holidays) != 0 || len(got[2].Holidays) != 0 {
+		t.Errorf("working segments carry holidays: %v, %v", got[0].Holidays, got[2].Holidays)
+	}
+}
+
+func TestAxisSegmentsMergesAHolidayMondayIntoTheWeekend(t *testing.T) {
+	loc := eastern(t)
+	// Friday 4 Sep 2026 12:00 to Tuesday 8 Sep 12:00, over Labor Day.
+	w := Window{Start: inLoc(loc, 2026, 9, 4, 12, 0), End: inLoc(loc, 2026, 9, 8, 12, 0)}
+	laborDay := Holiday{Date: NewCalendarDate(2026, 9, 7), Name: "Labor Day"}
+
+	got := AxisSegments(w, withHolidays(laborDay), loc)
+	assertTiling(t, w, got)
+
+	assertSegments(t, got, []AxisSegment{
+		{From: w.Start, To: inLoc(loc, 2026, 9, 4, 18, 0), Kind: SegmentWorking},
+		{From: inLoc(loc, 2026, 9, 4, 18, 0), To: inLoc(loc, 2026, 9, 8, 8, 0), Kind: SegmentOffHours},
+		{From: inLoc(loc, 2026, 9, 8, 8, 0), To: w.End, Kind: SegmentWorking},
+	})
+	if len(got[1].Holidays) != 1 || got[1].Holidays[0] != laborDay {
+		t.Errorf("band holidays = %v, want just %v", got[1].Holidays, laborDay)
+	}
+}
+
+// A holiday on a day the team has off anyway takes nothing away, and saying so
+// on the chart would only suggest it had.
+func TestAxisSegmentsIgnoresAHolidayOnADayOff(t *testing.T) {
+	loc := eastern(t)
+	// Friday 7 Aug 2026 12:00 to Monday 10 Aug 12:00, with the Saturday listed.
+	w := Window{Start: inLoc(loc, 2026, 8, 7, 12, 0), End: inLoc(loc, 2026, 8, 10, 12, 0)}
+
+	got := AxisSegments(w, withHolidays(Holiday{Date: NewCalendarDate(2026, 8, 8)}), loc)
+	assertTiling(t, w, got)
+
+	assertSegments(t, got, AxisSegments(w, DefaultWorkingHours(), loc))
+	for i, segment := range got {
+		if len(segment.Holidays) != 0 {
+			t.Errorf("segment %d carries %v", i, segment.Holidays)
+		}
+	}
+}
+
+func TestWorkingDurationSkipsAHoliday(t *testing.T) {
+	loc := eastern(t)
+	// Tuesday 11 Aug 16:00 to Thursday 13 Aug 10:00 is 2h + 10h + 2h on an
+	// ordinary week; with the Wednesday off it is the two ends alone.
+	from, to := inLoc(loc, 2026, 8, 11, 16, 0), inLoc(loc, 2026, 8, 13, 10, 0)
+	hours := withHolidays(Holiday{Date: NewCalendarDate(2026, 8, 12)})
+
+	if got, want := WorkingDuration(from, to, hours, loc), 4*time.Hour; got != want {
+		t.Errorf("WorkingDuration = %s, want %s", got, want)
+	}
+}

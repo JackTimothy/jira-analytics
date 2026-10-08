@@ -23,6 +23,7 @@ type projectView struct {
 type settingsView struct {
 	Timezone     string           `json:"timezone"`
 	WorkingHours workingHoursView `json:"workingHours"`
+	Holidays     []holidayView    `json:"holidays"`
 }
 
 // workingHoursView speaks day names and HH:MM clock times; the
@@ -78,6 +79,37 @@ func parseClockView(value string) (int, error) {
 	return parsed.Hour()*60 + parsed.Minute(), nil
 }
 
+// holidayView is one day off; the date is ISO-8601 with no time of day.
+type holidayView struct {
+	Date string `json:"date"`
+	Name string `json:"name,omitempty"`
+}
+
+// presentHolidays never returns nil, so a project with none says so with an
+// empty list rather than a null the client has to guard against.
+func presentHolidays(holidays []domain.Holiday) []holidayView {
+	out := make([]holidayView, 0, len(holidays))
+	for _, holiday := range holidays {
+		out = append(out, holidayView{Date: holiday.Date.String(), Name: holiday.Name})
+	}
+	return out
+}
+
+func holidaysFromView(views []holidayView) ([]domain.Holiday, error) {
+	if len(views) == 0 {
+		return nil, nil
+	}
+	holidays := make([]domain.Holiday, 0, len(views))
+	for _, v := range views {
+		date, err := domain.ParseCalendarDate(strings.TrimSpace(v.Date))
+		if err != nil {
+			return nil, fmt.Errorf("%w: holiday %q is not a YYYY-MM-DD date", domain.ErrInvalidSettings, v.Date)
+		}
+		holidays = append(holidays, domain.Holiday{Date: date, Name: strings.TrimSpace(v.Name)})
+	}
+	return holidays, nil
+}
+
 type trackerView struct {
 	ProjectKey string `json:"projectKey"`
 	BoardID    string `json:"boardId"`
@@ -98,6 +130,7 @@ func presentProject(p domain.Project) projectView {
 		Settings: settingsView{
 			Timezone:     timezone,
 			WorkingHours: presentWorkingHours(p.Settings.Schedule()),
+			Holidays:     presentHolidays(p.Settings.Holidays),
 		},
 		Tracker: trackerView{ProjectKey: p.Tracker.ProjectKey, BoardID: p.Tracker.BoardID},
 		Repos:   repos,
@@ -234,15 +267,20 @@ func presentKeys(keys []domain.IssueKey) []string {
 }
 
 type axisSegmentView struct {
-	From time.Time `json:"from"`
-	To   time.Time `json:"to"`
-	Kind string    `json:"kind"`
+	From     time.Time     `json:"from"`
+	To       time.Time     `json:"to"`
+	Kind     string        `json:"kind"`
+	Holidays []holidayView `json:"holidays,omitempty"`
 }
 
 func presentAxis(segments []domain.AxisSegment) []axisSegmentView {
 	out := make([]axisSegmentView, 0, len(segments))
 	for _, segment := range segments {
-		out = append(out, axisSegmentView{From: segment.From, To: segment.To, Kind: segment.Kind.String()})
+		view := axisSegmentView{From: segment.From, To: segment.To, Kind: segment.Kind.String()}
+		if len(segment.Holidays) > 0 {
+			view.Holidays = presentHolidays(segment.Holidays)
+		}
+		out = append(out, view)
 	}
 	return out
 }

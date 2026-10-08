@@ -3,8 +3,9 @@ import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MIN_PLOT_WIDTH, PADDING_RIGHT, clampGutter, defaultGutter } from "../chartlayout";
 import { buildCompressedScale, buildLinearScale } from "../timescale";
 import { chartFont, fit, measure } from "../textwidth";
+import { formatCalendarDate } from "../calendar";
 import { formatHours } from "../cycletime";
-import type { AxisSegment, CycleSpan, Interval, Parent, Sprint } from "../types";
+import type { AxisSegment, CycleSpan, Holiday, Interval, Parent, Sprint } from "../types";
 import { stateColor, stateLabel } from "../types";
 import { GutterDivider } from "./GutterDivider";
 
@@ -133,11 +134,24 @@ function dayTicks(start: Date, end: Date): Date[] {
 }
 
 /**
- * A band longer than 20 hours contains at least a full day off — a weekend or
- * holiday — and earns a label; ordinary nights stay quiet.
+ * What an off-hours band is called above the axis. A band the server says
+ * holds a holiday is one; otherwise a band longer than 20 hours contains at
+ * least a full day off — a weekend — and ordinary nights stay quiet.
  */
-function isWeekendBand(fromMs: number, toMs: number): boolean {
-  return toMs - fromMs > 20 * 3_600_000;
+function bandLabel(band: { fromMs: number; toMs: number; holidays: Holiday[] }): string | null {
+  if (band.holidays.length > 0) return "Hol";
+  if (band.toMs - band.fromMs > 20 * 3_600_000) return "S·S";
+  return null;
+}
+
+/** One line per holiday, for a band's tooltip. */
+function describeHolidays(holidays: Holiday[]): string {
+  return holidays
+    .map(
+      (holiday) =>
+        `${formatCalendarDate(holiday.date, { weekday: "short", month: "short", day: "numeric" })} — ${holiday.name || "Holiday"}`,
+    )
+    .join("\n");
 }
 
 function formatDay(date: Date): string {
@@ -245,7 +259,7 @@ export function Timeline({
                     stroke="var(--gridline)"
                     strokeWidth={1}
                   />
-                  {isWeekendBand(segment.fromMs, segment.toMs) && (
+                  {bandLabel(segment) && (
                     <text
                       x={segment.x + segment.width / 2}
                       y={AXIS_HEIGHT - 12}
@@ -253,9 +267,10 @@ export function Timeline({
                       textAnchor="middle"
                       fill="var(--text-muted)"
                     >
-                      S·S
+                      {bandLabel(segment)}
                     </text>
                   )}
+                  {segment.holidays.length > 0 && <title>{describeHolidays(segment.holidays)}</title>}
                 </g>
               ) : (
                 <text

@@ -1,4 +1,4 @@
-import type { AxisSegment } from "./types";
+import type { AxisSegment, Holiday } from "./types";
 
 /**
  * A piecewise time scale: working segments share the plot width in proportion
@@ -14,6 +14,7 @@ interface ScaleSegment {
   x: number;
   width: number;
   kind: "WORKING" | "OFF_HOURS";
+  holidays: Holiday[];
 }
 
 export interface TimeScale {
@@ -27,7 +28,7 @@ export function buildLinearScale(startMs: number, endMs: number, x0: number, wid
     const ratio = (new Date(iso).getTime() - startMs) / span;
     return x0 + Math.max(0, Math.min(1, ratio)) * width;
   }) as TimeScale;
-  scale.segments = [{ fromMs: startMs, toMs: endMs, x: x0, width, kind: "WORKING" }];
+  scale.segments = [{ fromMs: startMs, toMs: endMs, x: x0, width, kind: "WORKING", holidays: [] }];
   return scale;
 }
 
@@ -38,6 +39,7 @@ export function buildCompressedScale(axis: AxisSegment[], x0: number, width: num
     fromMs: new Date(s.from).getTime(),
     toMs: new Date(s.to).getTime(),
     kind: s.kind,
+    holidays: s.holidays ?? [],
   }));
 
   const offCount = parsed.filter((s) => s.kind === "OFF_HOURS").length;

@@ -69,6 +69,10 @@ func (s *Server) getProject(w http.ResponseWriter, r *http.Request) {
 type updateSettingsRequest struct {
 	Timezone     *string           `json:"timezone"`
 	WorkingHours *workingHoursView `json:"workingHours"`
+
+	// Holidays replaces the whole list when present; an empty list clears it,
+	// and leaving the field out keeps what is there.
+	Holidays *[]holidayView `json:"holidays"`
 }
 
 func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
@@ -97,6 +101,14 @@ func (s *Server) updateSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		settings.WorkingHours = hours
+	}
+	if body.Holidays != nil {
+		holidays, err := holidaysFromView(*body.Holidays)
+		if err != nil {
+			writeError(w, s.logger, http.StatusUnprocessableEntity, err.Error())
+			return
+		}
+		settings.Holidays = holidays
 	}
 
 	if err := s.projects.UpdateSettings(r.Context(), id, settings); err != nil {

@@ -14,6 +14,20 @@ type WorkingHours struct {
 	Days  []time.Weekday
 	Start int // minutes past local midnight, inclusive
 	End   int // minutes past local midnight, exclusive
+
+	// Holidays are days with no working hours at all, whatever weekday they
+	// fall on. They are configured beside the weekly pattern rather than as
+	// part of it, so ProjectSettings.Schedule fills them in.
+	Holidays []Holiday
+}
+
+// Holiday is a calendar day the team does not work, in the project's timezone.
+// It is a day rather than an instant for the same reason a due date is: "the
+// 26th" is a fact about a calendar, and only becomes a span of time once a
+// timezone says where that day begins and ends.
+type Holiday struct {
+	Date CalendarDate
+	Name string // optional; what the chart calls the day off
 }
 
 // DefaultWorkingHours is Monday to Friday, 08:00 to 18:00 — used when a
@@ -30,7 +44,9 @@ func DefaultWorkingHours() WorkingHours {
 
 const minutesPerDay = 24 * 60
 
-// Validate reports whether the schedule can bound an axis at all.
+// Validate reports whether the schedule can bound an axis at all. Holidays
+// cannot make it unusable, so they are not its concern; ProjectSettings checks
+// them where they are written.
 func (h WorkingHours) Validate() error {
 	if len(h.Days) == 0 {
 		return fmt.Errorf("%w: working hours need at least one working day", ErrInvalidSettings)
@@ -89,13 +105,19 @@ type AxisSegment struct {
 	From time.Time
 	To   time.Time
 	Kind AxisSegmentKind
+
+	// Holidays are the holidays that took working time out of this span, so a
+	// chart can say why a weekday went missing. A holiday that fell on a day
+	// off anyway changed nothing and is not listed.
+	Holidays []Holiday
 }
 
 func (s AxisSegment) Duration() time.Duration { return s.To.Sub(s.From) }
 
 // AxisSegments splits a window into alternating working and off-hours spans,
 // in the given timezone. Adjacent spans of the same kind are merged, so a
-// weekend arrives as one off-hours segment rather than several.
+// weekend arrives as one off-hours segment rather than several, and a holiday
+// Monday arrives as part of that weekend.
 //
 // Days are walked by constructing each local midnight with time.Date rather
 // than by adding 24 hours to an instant — the difference is exactly the two
@@ -125,13 +147,20 @@ func AxisSegments(w Window, hours WorkingHours, loc *time.Location) []AxisSegmen
 		segments = append(segments, AxisSegment{From: from, To: to, Kind: kind})
 	}
 
+	holidays := make(map[CalendarDate]Holiday, len(hours.Holidays))
+	for _, holiday := range hours.Holidays {
+		holidays[holiday.Date] = holiday
+	}
+
 	local := w.Start.In(loc)
 	day := time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, loc)
 
 	for day.Before(w.End) {
 		nextDay := time.Date(day.Year(), day.Month(), day.Day()+1, 0, 0, 0, 0, loc)
+		holiday, isHoliday := holidays[NewCalendarDate(day.Year(), day.Month(), day.Day())]
 
-		if hours.isWorkingDay(day.Weekday()) {
+		switch {
+		case hours.isWorkingDay(day.Weekday()) && !isHoliday:
 			// Built from clock components, not by adding a duration to
 			// midnight: adding real time lands an hour late on the
 			// spring-forward day and an hour early on the fall-back one.
@@ -148,7 +177,14 @@ func AxisSegments(w Window, hours WorkingHours, loc *time.Location) []AxisSegmen
 			appendSpan(day, workStart, SegmentOffHours)
 			appendSpan(workStart, workEnd, SegmentWorking)
 			appendSpan(workEnd, nextDay, SegmentOffHours)
-		} else {
+		case hours.isWorkingDay(day.Weekday()):
+			// A holiday on a working day. The day always overlaps the window —
+			// the walk starts on the window's first day and stops before its
+			// end — so the segment it just joined is the last one.
+			appendSpan(day, nextDay, SegmentOffHours)
+			last := &segments[len(segments)-1]
+			last.Holidays = append(last.Holidays, holiday)
+		default:
 			appendSpan(day, nextDay, SegmentOffHours)
 		}
 

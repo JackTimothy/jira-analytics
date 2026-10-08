@@ -18,10 +18,16 @@ export interface WorkingHours {
   end: string; // "18:00"
 }
 
+/** A whole day with no working hours, in the project's timezone. */
+export interface Holiday {
+  date: string; // "2026-11-26"
+  name?: string;
+}
+
 export interface Project {
   id: string;
   name: string;
-  settings: { timezone: string; workingHours: WorkingHours };
+  settings: { timezone: string; workingHours: WorkingHours; holidays: Holiday[] };
   tracker: { projectKey: string; boardId: string };
   repos: string[];
 }
@@ -77,6 +83,8 @@ export interface AxisSegment {
   from: string;
   to: string;
   kind: AxisSegmentKind;
+  /** The holidays that took working time out of this off-hours span. */
+  holidays?: Holiday[];
 }
 
 export interface BurndownPoint {
