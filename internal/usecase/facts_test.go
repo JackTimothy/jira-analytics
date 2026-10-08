@@ -267,3 +267,48 @@ func TestBurndownBurnsOnTheWorkItemsOwnStatus(t *testing.T) {
 		t.Errorf("remaining at the end = %v, want 0 — PROJ-1 was finished mid-sprint", last)
 	}
 }
+
+// Cycle time is measured from the work items' own history, which is fetched
+// alongside the sub-tasks', and it answers the same scope question as the
+// burndown. The fixture's PROJ-2 has no due date, so committed scope drops it
+// from the average.
+func TestCycleTimeFollowsTheScopeToggle(t *testing.T) {
+	perPoint := map[domain.Scope]time.Duration{}
+	counted := map[domain.Scope]int{}
+
+	for _, scope := range []domain.Scope{domain.ScopeAll, domain.ScopeCommitted} {
+		projects, tracker, code := buildFixture()
+		for i, points := range []domain.Points{2, 3} {
+			tracker.parents[i].Type = "Story"
+			tracker.parents[i].Points = points
+			tracker.parents[i].Status = statusDone
+		}
+		// 09:00 to 11:00 Eastern on Tuesday: 2 working hours over 2 points.
+		tracker.history["PROJ-1"] = []domain.StatusChange{
+			{At: ts(4, 13), From: statusToDo, To: statusInProgress},
+			{At: ts(4, 15), From: statusInProgress, To: statusDone},
+		}
+		// 09:00 to 15:00 Eastern on Wednesday: 6 working hours over 3 points.
+		tracker.history["PROJ-2"] = []domain.StatusChange{
+			{At: ts(5, 13), From: statusToDo, To: statusInProgress},
+			{At: ts(5, 19), From: statusInProgress, To: statusDone},
+		}
+
+		result, err := NewRetrospective(projects, tracker, code).
+			Build(context.Background(), RetrospectiveRequest{ProjectID: "activation", SprintID: "100", Scope: scope})
+		if err != nil {
+			t.Fatalf("Build(%s): %v", scope, err)
+		}
+		perPoint[scope] = result.CycleTime.PerPoint
+		counted[scope] = len(result.CycleTime.Counted)
+	}
+
+	if counted[domain.ScopeAll] != 2 || perPoint[domain.ScopeAll] != 90*time.Minute {
+		t.Errorf("scope=all counted %d at %s per point, want 2 at 1h30m",
+			counted[domain.ScopeAll], perPoint[domain.ScopeAll])
+	}
+	if counted[domain.ScopeCommitted] != 1 || perPoint[domain.ScopeCommitted] != time.Hour {
+		t.Errorf("scope=committed counted %d at %s per point, want 1 at 1h — PROJ-2 should leave with its scope",
+			counted[domain.ScopeCommitted], perPoint[domain.ScopeCommitted])
+	}
+}

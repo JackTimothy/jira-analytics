@@ -67,6 +67,10 @@ type Retrospective struct {
 	// Burndown is the same sprint measured in points rather than in states. It
 	// follows the same scope selection as Groups, so the toggle moves both.
 	Burndown Burndown
+
+	// CycleTime is how long finished work took, in working hours. It follows
+	// the same scope selection as the burndown, and for the same reason.
+	CycleTime SprintCycleTime
 }
 
 // Scope selects which parents appear in a retrospective.

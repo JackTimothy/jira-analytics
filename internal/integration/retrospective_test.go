@@ -338,10 +338,13 @@ type retrospectiveBody struct {
 		Name string `json:"name"`
 	} `json:"sprint"`
 	Parents []struct {
-		Key     string  `json:"key"`
-		DueDate *string `json:"dueDate"`
-		InScope bool    `json:"inScope"`
-		Rows    []struct {
+		Key       string  `json:"key"`
+		DueDate   *string `json:"dueDate"`
+		InScope   bool    `json:"inScope"`
+		CycleTime *struct {
+			Hours float64 `json:"hours"`
+		} `json:"cycleTime"`
+		Rows []struct {
 			Kind      string `json:"kind"`
 			Key       string `json:"key"`
 			Label     string `json:"label"`
@@ -357,6 +360,13 @@ type retrospectiveBody struct {
 		Total       float64  `json:"total"`
 		Unestimated []string `json:"unestimated"`
 	} `json:"burndown"`
+	CycleTime struct {
+		HoursPerPoint *float64 `json:"hoursPerPoint"`
+		Items         []struct {
+			Key   string  `json:"key"`
+			Hours float64 `json:"hours"`
+		} `json:"items"`
+	} `json:"cycleTime"`
 }
 
 func fetch(t *testing.T, handler http.Handler, target string) retrospectiveBody {
@@ -580,5 +590,53 @@ func TestRetrospectiveChartsASprintWithNoSubTasks(t *testing.T) {
 	}
 	if body.Burndown.Total <= 0 {
 		t.Error("the burndown lost its points along with the sub-tasks")
+	}
+}
+
+// Cycle time end to end: Jira's status ids and offset timestamps have to
+// survive translation, and the project's timezone has to decide what counts as
+// working time. PROJ-4 is a Task moved into progress at 09:00 on Tuesday and
+// to Done at 13:00 on Wednesday, Eastern: 9 working hours, then 5.
+func TestRetrospectiveMeasuresCycleTimeInWorkingHours(t *testing.T) {
+	parents := strings.Replace(sprintParentsResponse,
+		`"customfield_10059":8,
+	 "status":{"id":"10039","name":"To Do","statusCategory":{"key":"new"}}`,
+		`"customfield_10059":8,
+	 "status":{"id":"10024","name":"Done","statusCategory":{"key":"done"}}`, 1)
+	if parents == sprintParentsResponse {
+		t.Fatal("the fixture no longer has PROJ-4 in To Do; update this test")
+	}
+	history := strings.Replace(statusHistoryResponse, `{"issues":[`, `{"issues":[
+	{"key":"PROJ-4","changelog":{"startAt":0,"maxResults":100,"total":2,"histories":[
+		{"created":"2026-08-05T13:00:00.000-0400","items":[
+			{"field":"status","from":"3","fromString":"In Progress","to":"10024","toString":"Done"}]},
+		{"created":"2026-08-04T09:00:00.000-0400","items":[
+			{"field":"status","from":"10039","fromString":"To Do","to":"3","toString":"In Progress"}]}]}},`, 1)
+
+	handler, _ := buildStackWith(t, jiraRoutes, githubRoutes, func(jql string) (string, bool) {
+		switch {
+		case strings.HasPrefix(jql, "sprint = "):
+			return parents, true
+		case strings.HasPrefix(jql, "key IN "):
+			return history, true
+		}
+		return routeJQL(jql)
+	})
+
+	body := fetch(t, handler, "/api/v1/projects/team/sprints/7354/retrospective")
+
+	for _, parent := range body.Parents {
+		switch {
+		case parent.Key == "PROJ-4" && (parent.CycleTime == nil || parent.CycleTime.Hours != 14):
+			t.Errorf("PROJ-4 cycle time = %+v, want 14 hours", parent.CycleTime)
+		case parent.Key != "PROJ-4" && parent.CycleTime != nil:
+			t.Errorf("%s has a cycle time of %+v but is not Done", parent.Key, parent.CycleTime)
+		}
+	}
+	if items := body.CycleTime.Items; len(items) != 1 || items[0].Key != "PROJ-4" {
+		t.Errorf("counted items = %+v, want PROJ-4 alone", items)
+	}
+	if got := body.CycleTime.HoursPerPoint; got == nil || *got != 1.75 {
+		t.Errorf("hours per point = %v, want 1.75 — 14 hours over 8 points", got)
 	}
 }

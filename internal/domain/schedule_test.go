@@ -245,3 +245,57 @@ func TestWorkingHoursValidate(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkingDurationCountsOnlyWorkingHours(t *testing.T) {
+	loc := eastern(t)
+	tests := []struct {
+		name     string
+		from, to time.Time
+		want     time.Duration
+	}{
+		{
+			name: "inside one working day",
+			from: inLoc(loc, 2026, 8, 10, 9, 0), to: inLoc(loc, 2026, 8, 10, 14, 0),
+			want: 5 * time.Hour,
+		},
+		{
+			name: "across a night",
+			from: inLoc(loc, 2026, 8, 10, 16, 0), to: inLoc(loc, 2026, 8, 11, 10, 0),
+			want: 4 * time.Hour,
+		},
+		{
+			name: "across a weekend",
+			from: inLoc(loc, 2026, 8, 7, 16, 0), to: inLoc(loc, 2026, 8, 10, 10, 0),
+			want: 4 * time.Hour,
+		},
+		{
+			name: "both ends outside working hours",
+			from: inLoc(loc, 2026, 8, 10, 20, 0), to: inLoc(loc, 2026, 8, 12, 6, 0),
+			want: 10 * time.Hour,
+		},
+		{
+			// Sunday 1 Nov 2026 is 25 real hours long. The extra hour is not
+			// working time, so it must not appear.
+			name: "across the fall-back weekend",
+			from: inLoc(loc, 2026, 10, 30, 16, 0), to: inLoc(loc, 2026, 11, 2, 10, 0),
+			want: 4 * time.Hour,
+		},
+		{
+			name: "an empty range",
+			from: inLoc(loc, 2026, 8, 10, 9, 0), to: inLoc(loc, 2026, 8, 10, 9, 0),
+			want: 0,
+		},
+		{
+			name: "an inverted range",
+			from: inLoc(loc, 2026, 8, 10, 14, 0), to: inLoc(loc, 2026, 8, 10, 9, 0),
+			want: 0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := WorkingDuration(tc.from, tc.to, DefaultWorkingHours(), loc); got != tc.want {
+				t.Errorf("WorkingDuration = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}

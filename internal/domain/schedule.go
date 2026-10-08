@@ -158,6 +158,22 @@ func AxisSegments(w Window, hours WorkingHours, loc *time.Location) []AxisSegmen
 	return segments
 }
 
+// WorkingDuration is how much of the time between two instants fell inside
+// working hours.
+//
+// It is measured over the same segments the axis is drawn from, so a duration
+// read off this agrees with the width it occupies on the compressed chart. An
+// empty or inverted range is no time at all.
+func WorkingDuration(from, to time.Time, hours WorkingHours, loc *time.Location) time.Duration {
+	var working time.Duration
+	for _, segment := range AxisSegments(Window{Start: from, End: to}, hours, loc) {
+		if segment.Kind == SegmentWorking {
+			working += segment.Duration()
+		}
+	}
+	return working
+}
+
 // clampSpan intersects [from, to) with the window.
 func clampSpan(from, to time.Time, w Window) (time.Time, time.Time) {
 	if from.Before(w.Start) {

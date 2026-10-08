@@ -7,6 +7,7 @@ import { Legend } from "./components/Legend";
 import { ProjectSettings } from "./components/ProjectSettings";
 import { Burndown } from "./components/Burndown";
 import { BurndownTable } from "./components/BurndownTable";
+import { CycleTimeCard } from "./components/CycleTimeCard";
 import { Timeline } from "./components/Timeline";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { TimelineTable } from "./components/TimelineTable";
@@ -412,6 +413,8 @@ function RetrospectiveView({
               </p>
             )}
           </section>
+
+          <CycleTimeCard cycleTime={data.cycleTime} filtering={filtering} />
 
           {data.warnings.length > 0 && (
             <section className="notice">

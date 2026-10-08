@@ -112,6 +112,8 @@ func (r *Retrospective) Build(ctx context.Context, req RetrospectiveRequest) (do
 	retrospective := r.assemble(sprint, location, project.Settings, inScope, subTasks, history, codeEvents)
 	retrospective.Burndown = domain.BuildBurndown(
 		burndownItems(inScope, history), sprint, project.Settings.Schedule(), location)
+	retrospective.CycleTime = domain.BuildCycleTimes(
+		inScope, history, sprint, project.Settings.Schedule(), location)
 	return retrospective, nil
 }
 

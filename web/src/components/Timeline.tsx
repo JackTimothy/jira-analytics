@@ -3,7 +3,8 @@ import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import { MIN_PLOT_WIDTH, PADDING_RIGHT, clampGutter, defaultGutter } from "../chartlayout";
 import { buildCompressedScale, buildLinearScale } from "../timescale";
 import { chartFont, fit, measure } from "../textwidth";
-import type { AxisSegment, Interval, Parent, Sprint } from "../types";
+import { formatHours } from "../cycletime";
+import type { AxisSegment, CycleSpan, Interval, Parent, Sprint } from "../types";
 import { stateColor, stateLabel } from "../types";
 import { GutterDivider } from "./GutterDivider";
 
@@ -45,6 +46,8 @@ interface LayoutRow {
   sublabel?: string;
   inScope?: boolean;
   intervals?: Interval[];
+  /** A finished Story, Task or Bug's cycle time, noted on its heading. */
+  cycle?: CycleSpan;
   y: number;
 }
 
@@ -95,6 +98,7 @@ function layout(parents: Parent[]): { rows: LayoutRow[]; height: number } {
       label: `${parent.key} — ${parent.summary}`,
       inScope: parent.inScope,
       intervals: solo ? parent.rows[0].intervals : undefined,
+      cycle: parent.cycleTime ?? undefined,
       y,
     });
     y += GROUP_HEADER_HEIGHT;
@@ -310,15 +314,28 @@ export function Timeline({
 
           if (row.kind === "group") {
             const headingBar = row.intervals ?? [];
+            const hasBar = headingBar.length > 0;
             // Headings stay inside the gutter, as rows do. They were once
             // allowed the full width when no bar sat beside them, which the
             // character limit made theoretical — measured, they cross the axis
             // and read as a rendering fault, and the boundary now means
-            // something the reader can take hold of. The out-of-scope note
-            // shares the gutter only when a bar has taken the plot edge.
-            const note = row.inScope === false && headingBar.length > 0 ? "not committed" : "";
+            // something the reader can take hold of. The notes share the
+            // gutter only when a bar has taken the plot edge.
+            //
+            // Cycle time and scope travel as one note rather than two, so
+            // there is one right-aligned string to place and to measure.
+            const note = [
+              row.cycle ? `cycle ${formatHours(row.cycle.hours)}` : "",
+              row.inScope === false ? (hasBar ? "not committed" : "not in committed scope") : "",
+            ]
+              .filter(Boolean)
+              .join(" · ");
             const titleWidth =
-              labelWidth - LABEL_GAP - (note ? measure(note, NOTE_FONT) + LABEL_GAP : 0);
+              labelWidth - LABEL_GAP - (note && hasBar ? measure(note, NOTE_FONT) + LABEL_GAP : 0);
+            const title = row.cycle
+              ? `${row.label}\nCycle time: ${formatHours(row.cycle.hours)} of working time, ` +
+                `${new Date(row.cycle.started).toLocaleString()} → ${new Date(row.cycle.finished).toLocaleString()}`
+              : row.label;
             return (
               <g key={`group-${row.key}`}>
                 {headingBar.map((interval, index) => {
@@ -347,21 +364,22 @@ export function Timeline({
                   fontWeight={600}
                   fill="var(--text-primary)"
                 >
-                  <title>{row.label}</title>
+                  <title>{title}</title>
                   {fit(row.label, HEADING_FONT, titleWidth)}
                 </text>
-                {row.inScope === false && (
+                {note && (
                   // Right-aligned inside the gutter when the heading carries a
                   // bar, since the plot edge is occupied; at the plot edge
                   // otherwise, where there is nothing to collide with.
                   <text
-                    x={headingBar.length === 0 ? labelWidth + plotWidth : labelWidth - 10}
+                    x={hasBar ? labelWidth - 10 : labelWidth + plotWidth}
                     y={y + GROUP_HEADER_HEIGHT - 10}
                     fontSize={11}
                     textAnchor="end"
                     fill="var(--text-muted)"
                   >
-                    {headingBar.length === 0 ? "not in committed scope" : "not committed"}
+                    <title>{title}</title>
+                    {note}
                   </text>
                 )}
               </g>

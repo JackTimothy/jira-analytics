@@ -53,6 +53,13 @@ export interface Row {
   intervals: Interval[];
 }
 
+/** One work item's cycle time: first In Progress to Done, working hours only. */
+export interface CycleSpan {
+  hours: number;
+  started: string;
+  finished: string;
+}
+
 export interface Parent {
   key: string;
   summary: string;
@@ -60,6 +67,8 @@ export interface Parent {
   dueDate: string | null;
   inScope: boolean;
   rows: Row[];
+  /** Null unless the item is a Story, Task or Bug that is Done. */
+  cycleTime: CycleSpan | null;
 }
 
 export type AxisSegmentKind = "WORKING" | "OFF_HOURS";
@@ -82,12 +91,33 @@ export interface Burndown {
   unestimated: string[];
 }
 
+/** One of the items a sprint's cycle time average was taken over. */
+export interface CycleTimeItem {
+  key: string;
+  summary: string;
+  type: string;
+  points: number;
+  hours: number;
+  hoursPerPoint: number;
+  started: string;
+  finished: string;
+}
+
+export interface SprintCycleTime {
+  /** The mean of each counted item's hours per point; null when none finished. */
+  hoursPerPoint: number | null;
+  items: CycleTimeItem[];
+  unestimated: string[];
+  unstarted: string[];
+}
+
 export interface Retrospective {
   sprint: Sprint;
   parents: Parent[];
   warnings: string[];
   axis: AxisSegment[];
   burndown: Burndown;
+  cycleTime: SprintCycleTime;
 }
 
 export type Scope = "all" | "committed";

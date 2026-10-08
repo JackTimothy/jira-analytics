@@ -132,11 +132,12 @@ func presentSprints(sprints []domain.Sprint) []sprintView {
 }
 
 type retrospectiveView struct {
-	Sprint   sprintView        `json:"sprint"`
-	Parents  []parentView      `json:"parents"`
-	Warnings []string          `json:"warnings"`
-	Axis     []axisSegmentView `json:"axis"`
-	Burndown burndownView      `json:"burndown"`
+	Sprint    sprintView          `json:"sprint"`
+	Parents   []parentView        `json:"parents"`
+	Warnings  []string            `json:"warnings"`
+	Axis      []axisSegmentView   `json:"axis"`
+	Burndown  burndownView        `json:"burndown"`
+	CycleTime sprintCycleTimeView `json:"cycleTime"`
 }
 
 type burndownView struct {
@@ -156,10 +157,7 @@ func presentBurndown(b domain.Burndown) burndownView {
 		Total:       float64(b.Total),
 		Remaining:   presentBurndownPoints(b.Remaining),
 		Ideal:       presentBurndownPoints(b.Ideal),
-		Unestimated: make([]string, 0, len(b.Unestimated)),
-	}
-	for _, key := range b.Unestimated {
-		view.Unestimated = append(view.Unestimated, string(key))
+		Unestimated: presentKeys(b.Unestimated),
 	}
 	return view
 }
@@ -168,6 +166,69 @@ func presentBurndownPoints(points []domain.BurndownPoint) []burndownPointView {
 	out := make([]burndownPointView, 0, len(points))
 	for _, point := range points {
 		out = append(out, burndownPointView{At: point.At, Remaining: float64(point.Remaining)})
+	}
+	return out
+}
+
+// sprintCycleTimeView is the sprint-level cycle time. Hours are sent unrounded;
+// how many places to show is the reader's concern, not the contract's.
+type sprintCycleTimeView struct {
+	// HoursPerPoint is null when nothing finished during the sprint. Zero
+	// would claim the team delivered instantly.
+	HoursPerPoint *float64            `json:"hoursPerPoint"`
+	Items         []cycleTimeItemView `json:"items"`
+	Unestimated   []string            `json:"unestimated"`
+	Unstarted     []string            `json:"unstarted"`
+}
+
+// cycleTimeItemView is one of the items the sprint's average was taken over.
+type cycleTimeItemView struct {
+	Key           string    `json:"key"`
+	Summary       string    `json:"summary"`
+	Type          string    `json:"type"`
+	Points        float64   `json:"points"`
+	Hours         float64   `json:"hours"`
+	HoursPerPoint float64   `json:"hoursPerPoint"`
+	Started       time.Time `json:"started"`
+	Finished      time.Time `json:"finished"`
+}
+
+// cycleSpanView is one work item's own cycle time, on its timeline heading.
+type cycleSpanView struct {
+	Hours    float64   `json:"hours"`
+	Started  time.Time `json:"started"`
+	Finished time.Time `json:"finished"`
+}
+
+func presentCycleTime(c domain.SprintCycleTime) sprintCycleTimeView {
+	view := sprintCycleTimeView{
+		Items:       make([]cycleTimeItemView, 0, len(c.Counted)),
+		Unestimated: presentKeys(c.Unestimated),
+		Unstarted:   presentKeys(c.Unstarted),
+	}
+	if len(c.Counted) > 0 {
+		perPoint := c.PerPoint.Hours()
+		view.HoursPerPoint = &perPoint
+	}
+	for _, cycle := range c.Counted {
+		view.Items = append(view.Items, cycleTimeItemView{
+			Key:           string(cycle.Item.Key),
+			Summary:       cycle.Item.Summary,
+			Type:          cycle.Item.Type,
+			Points:        float64(cycle.Item.Points),
+			Hours:         cycle.Working.Hours(),
+			HoursPerPoint: cycle.PerPoint().Hours(),
+			Started:       cycle.Started,
+			Finished:      cycle.Finished,
+		})
+	}
+	return view
+}
+
+func presentKeys(keys []domain.IssueKey) []string {
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, string(key))
 	}
 	return out
 }
@@ -193,6 +254,10 @@ type parentView struct {
 	DueDate *string   `json:"dueDate"`
 	InScope bool      `json:"inScope"`
 	Rows    []rowView `json:"rows"`
+
+	// CycleTime is null unless the item is a Story, Task or Bug that is Done
+	// and whose cycle could be measured.
+	CycleTime *cycleSpanView `json:"cycleTime"`
 }
 
 // rowView is one charted line. Kind says what it stands for: a sub-task, the
@@ -212,6 +277,15 @@ type intervalView struct {
 }
 
 func presentRetrospective(r domain.Retrospective) retrospectiveView {
+	cycles := make(map[domain.IssueKey]*cycleSpanView, len(r.CycleTime.Items))
+	for _, cycle := range r.CycleTime.Items {
+		cycles[cycle.Item.Key] = &cycleSpanView{
+			Hours:    cycle.Working.Hours(),
+			Started:  cycle.Started,
+			Finished: cycle.Finished,
+		}
+	}
+
 	parents := make([]parentView, 0, len(r.Groups))
 	for _, group := range r.Groups {
 		var due *string
@@ -239,12 +313,13 @@ func presentRetrospective(r domain.Retrospective) retrospectiveView {
 		}
 
 		parents = append(parents, parentView{
-			Key:     string(group.Parent.Key),
-			Summary: group.Parent.Summary,
-			Type:    group.Parent.Type,
-			DueDate: due,
-			InScope: group.InScope,
-			Rows:    rows,
+			Key:       string(group.Parent.Key),
+			Summary:   group.Parent.Summary,
+			Type:      group.Parent.Type,
+			DueDate:   due,
+			InScope:   group.InScope,
+			Rows:      rows,
+			CycleTime: cycles[group.Parent.Key],
 		})
 	}
 
@@ -254,10 +329,11 @@ func presentRetrospective(r domain.Retrospective) retrospectiveView {
 	}
 
 	return retrospectiveView{
-		Sprint:   presentSprint(r.Sprint),
-		Parents:  parents,
-		Warnings: warnings,
-		Axis:     presentAxis(r.Axis),
-		Burndown: presentBurndown(r.Burndown),
+		Sprint:    presentSprint(r.Sprint),
+		Parents:   parents,
+		Warnings:  warnings,
+		Axis:      presentAxis(r.Axis),
+		Burndown:  presentBurndown(r.Burndown),
+		CycleTime: presentCycleTime(r.CycleTime),
 	}
 }

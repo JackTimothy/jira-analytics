@@ -59,6 +59,37 @@ The scope line is flat at the sprint's final total. Work added mid-sprint is
 therefore counted from the start, which a stepped scope line read from the
 sprint field's own history would fix.
 
+### Cycle time
+
+How long finished work took, counted in working hours only. The clock starts
+the first time a work item's own status enters an in-progress status — however
+long before the sprint that was — and stops the last time it reaches Done.
+Nights and weekends are taken out using the same schedule and timezone as the
+timeline's axis, so a story picked up on Friday afternoon and finished on Monday
+morning took a few hours, not three days.
+
+Only Stories, Tasks and Bugs are measured, and only on reaching the status named
+Done. Cancelled shares Done's category, which is right for the burndown and wrong
+here: abandoned work has no delivery time to report. Work that was reopened is
+measured to its final Done, because its rework is part of how long it took.
+
+Each finished item's cycle time is noted on its timeline heading. The sprint's
+figure is hours per story point: every Story, Task and Bug that reached Done
+during the sprint has its cycle time divided by its estimate, and the figure is
+the mean of those. It is not the sprint's total hours over its total points —
+that lets the largest item decide the figure, where the mean gives every
+finished item one vote. "During the sprint" is the burndown's rule, after the
+sprint opened and up to its close, so the two views agree about what finished.
+
+Like the burndown, it follows the scope toggle and ignores the row filter. Items
+that finished with no estimate, and items moved straight to Done without ever
+being marked in progress, cannot contribute, and are named under the figure
+rather than silently left out.
+
+There is no holiday calendar, so a bank holiday counts as a working day. A
+sprint ends at its planned end date, not when someone pressed Complete. Branches
+and sub-tasks do not start the clock; only the work item's own status does.
+
 ### The seven states
 
 | State | Meaning |

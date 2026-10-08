@@ -330,3 +330,69 @@ func TestProjectsExposeTheScheduleWithDefaults(t *testing.T) {
 		t.Errorf("expected the default schedule on an unconfigured project, got %+v", hours)
 	}
 }
+
+func TestRetrospectivePresentsCycleTime(t *testing.T) {
+	server, _, retros := newTestServer()
+	story := domain.WorkItem{Key: "PROJ-1", Summary: "Story", Type: "Story", Points: 2}
+	cycle := domain.CycleTime{
+		Item:     story,
+		Started:  time.Date(2026, 8, 4, 20, 0, 0, 0, time.UTC),
+		Finished: time.Date(2026, 8, 5, 15, 0, 0, 0, time.UTC),
+		Working:  5 * time.Hour,
+	}
+	row := []domain.Row{{Kind: domain.RowWorkItem, Key: "PROJ-1", Label: "Story"}}
+	retros.result = domain.Retrospective{
+		Sprint: domain.Sprint{ID: "100", Name: "Sprint 26-31"},
+		Groups: []domain.ParentGroup{
+			{Parent: story, Rows: row},
+			{Parent: domain.WorkItem{Key: "PROJ-2", Summary: "Open"}, Rows: row},
+		},
+		CycleTime: domain.SprintCycleTime{
+			Items:       []domain.CycleTime{cycle},
+			Counted:     []domain.CycleTime{cycle},
+			PerPoint:    150 * time.Minute,
+			Unestimated: []domain.IssueKey{"PROJ-3"},
+		},
+	}
+
+	rec := do(t, server, http.MethodGet, "/api/v1/projects/activation/sprints/100/retrospective", "")
+	var got retrospectiveView
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+
+	if span := got.Parents[0].CycleTime; span == nil || span.Hours != 5 || !span.Finished.Equal(cycle.Finished) {
+		t.Errorf("PROJ-1 cycle time = %+v, want 5 hours finishing %s", span, cycle.Finished)
+	}
+	if got.Parents[1].CycleTime != nil {
+		t.Errorf("PROJ-2 has a cycle time of %+v, want none — it is not finished", got.Parents[1].CycleTime)
+	}
+	sprint := got.CycleTime
+	if sprint.HoursPerPoint == nil || *sprint.HoursPerPoint != 2.5 {
+		t.Errorf("hours per point = %v, want 2.5", sprint.HoursPerPoint)
+	}
+	if len(sprint.Items) != 1 || sprint.Items[0].Key != "PROJ-1" ||
+		sprint.Items[0].Hours != 5 || sprint.Items[0].HoursPerPoint != 2.5 || sprint.Items[0].Points != 2 {
+		t.Errorf("items = %+v, want PROJ-1 at 5 hours, 2.5 per point", sprint.Items)
+	}
+	if len(sprint.Unestimated) != 1 || sprint.Unestimated[0] != "PROJ-3" {
+		t.Errorf("unestimated = %v, want [PROJ-3]", sprint.Unestimated)
+	}
+}
+
+func TestRetrospectiveRendersEmptyCycleTimeAsNullAndArrays(t *testing.T) {
+	// Nothing finished is not zero hours per point, and nil slices would
+	// marshal to null and force the GUI to handle two shapes.
+	server, _, _ := newTestServer()
+	rec := do(t, server, http.MethodGet, "/api/v1/projects/activation/sprints/100/retrospective", "")
+	var body struct {
+		CycleTime json.RawMessage `json:"cycleTime"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	want := `{"hoursPerPoint":null,"items":[],"unestimated":[],"unstarted":[]}`
+	if string(body.CycleTime) != want {
+		t.Errorf("cycleTime = %s, want %s", body.CycleTime, want)
+	}
+}

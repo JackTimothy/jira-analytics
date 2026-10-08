@@ -16,9 +16,16 @@ const (
 	CategoryDone
 )
 
-// BlockedStatusName is the one status name the process itself defines. Every
-// other status reaches the domain as a category.
-const BlockedStatusName = "Blocked"
+// BlockedStatusName and DoneStatusName are the two status names the process
+// itself defines. Every other status reaches the domain as a category.
+//
+// Done is named as well as categorised because the category is too broad for
+// one question: Cancelled and Won't Do share it, which is right for whether
+// points still remain and wrong for how long finished work took.
+const (
+	BlockedStatusName = "Blocked"
+	DoneStatusName    = "Done"
+)
 
 type IssueStatus struct {
 	Name     string
@@ -29,6 +36,12 @@ func (s IssueStatus) IsDone() bool { return s.Category == CategoryDone }
 
 func (s IssueStatus) IsBlocked() bool {
 	return strings.EqualFold(strings.TrimSpace(s.Name), BlockedStatusName)
+}
+
+// IsCompleted reports whether the status is Done itself, rather than merely in
+// the done category alongside Cancelled and its relatives.
+func (s IssueStatus) IsCompleted() bool {
+	return strings.EqualFold(strings.TrimSpace(s.Name), DoneStatusName)
 }
 
 // IsTerminalOrUnstarted reports whether a status carries no implication that

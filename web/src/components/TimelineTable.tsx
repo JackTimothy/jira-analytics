@@ -1,3 +1,4 @@
+import { formatHours } from "../cycletime";
 import type { Parent } from "../types";
 import { stateColor, stateLabel } from "../types";
 
@@ -13,6 +14,9 @@ export function TimelineTable({ parents }: { parents: Parent[] }) {
         <thead>
           <tr>
             <th scope="col">Parent</th>
+            <th scope="col" style={{ textAlign: "right" }}>
+              Cycle time
+            </th>
             <th scope="col">Row</th>
             <th scope="col">State</th>
             <th scope="col">From</th>
@@ -25,6 +29,11 @@ export function TimelineTable({ parents }: { parents: Parent[] }) {
               row.intervals.map((interval, index) => (
                 <tr key={`${parent.key}-${rowIndex}-${index}`}>
                   <td>{index === 0 ? parent.key : ""}</td>
+                  <td style={{ textAlign: "right" }}>
+                    {rowIndex === 0 && index === 0 && parent.cycleTime
+                      ? formatHours(parent.cycleTime.hours)
+                      : ""}
+                  </td>
                   <td>{index === 0 ? (row.kind === "BRANCH" ? row.label : row.key) : ""}</td>
                   <td>
                     <span className="row" style={{ gap: 6 }}>
